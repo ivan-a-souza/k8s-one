@@ -391,6 +391,11 @@ apply_manifests() {
     -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' 2>/dev/null || true
   log "local-path-provisioner applied (default StorageClass)."
 
+  # Apply HAProxy Ingress Controller
+  log "Applying HAProxy Ingress Controller..."
+  $kc apply -f "$MANIFESTS/haproxy-ingress.yaml" 2>&1 | tail -5
+  log "HAProxy Ingress Controller applied."
+
   log "============================================="
   log "  K8s-One cluster is READY!"
   log "  API Server: https://$NODE_IP:$API_PORT"

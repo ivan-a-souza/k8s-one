@@ -111,6 +111,7 @@ COPY --from=builder /build/cni/ /opt/cni/bin/
 # ── Manifests ─────────────────────────────────────────────────────────────
 COPY --from=builder /build/manifests/ /opt/manifests/
 COPY manifests/coredns.yaml /opt/manifests/coredns.yaml
+COPY manifests/haproxy-ingress.yaml /opt/manifests/haproxy-ingress.yaml
 
 # ── Configs & scripts ─────────────────────────────────────────────────────
 COPY configs/containerd-config.toml /etc/containerd/config.toml

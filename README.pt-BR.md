@@ -21,6 +21,7 @@ Empacotado numa **imagem distroless-style** via multi-stage build.
 │  └──────────┘  └──────────┘                      │
 │                                                  │
 │  CNI: Calico  │  DNS: CoreDNS  │  SC: local-path │
+│         Ingress: HAProxy (Ports 8080/8443)       │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -102,6 +103,7 @@ Todos os binários são baixados de fontes oficiais no build. Nenhum componente 
 | **Calico** | v3.29.2 | projectcalico/calico | CNI — networking + network policy |
 | **CoreDNS** | v1.12.0 | registry.k8s.io | DNS do cluster |
 | **local-path-provisioner** | v0.0.35 | rancher/local-path-provisioner | Dynamic PV provisioning via hostPath |
+| **HAProxy Ingress** | latest | haproxytech/kubernetes-ingress | Ingress Controller |
 
 ---
 
@@ -158,7 +160,8 @@ entrypoint.sh
     ├── kubectl apply calico.yaml
     ├── aguarda Node Ready
     ├── kubectl apply coredns.yaml
-    └── kubectl apply local-path-storage.yaml
+    ├── kubectl apply local-path-storage.yaml
+    └── kubectl apply haproxy-ingress.yaml
 ```
 
 ---
@@ -361,6 +364,34 @@ spec:
   - port: 80
     targetPort: 80
   type: ClusterIP
+
+### Ingress com HAProxy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web-ingress
+  annotations:
+    haproxy.org/ingress.class: haproxy
+spec:
+  rules:
+  - host: meu-app.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: web
+            port:
+              number: 80
+```
+
+```bash
+kubectl apply -f ingress.yaml
+curl -H "Host: meu-app.local" http://localhost:8080/
+```
 ```
 
 ---
@@ -605,6 +636,8 @@ docker compose up -d     # fresh start
 | Porta | Protocolo | Uso |
 |---|---|---|
 | `6443` | TCP | Kubernetes API Server |
+| `8080` | TCP | HAProxy Ingress HTTP |
+| `8443` | TCP | HAProxy Ingress HTTPS |
 
 ---
 

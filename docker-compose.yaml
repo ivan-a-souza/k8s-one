@@ -20,6 +20,8 @@ services:
       - local-path-data:/opt/local-path-provisioner
     ports:
       - "6443:6443"
+      - "8080:30080"
+      - "8443:30443"
     restart: unless-stopped
 
 volumes:
