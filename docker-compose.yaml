@@ -1,0 +1,31 @@
+services:
+  k8s:
+    build: .
+    image: k8s-one:latest
+    container_name: k8s-one
+    hostname: k8s-one
+    privileged: true
+    cgroup: host
+    tmpfs:
+      - /run
+      - /tmp
+    volumes:
+      - /sys:/sys:rw
+      - /lib/modules:/lib/modules:ro
+      - etcd-data:/var/lib/etcd
+      - containerd-data:/var/lib/containerd
+      - kubelet-data:/var/lib/kubelet
+      - k8s-pki:/etc/kubernetes/pki
+      - k8s-configs:/etc/kubernetes
+      - local-path-data:/opt/local-path-provisioner
+    ports:
+      - "6443:6443"
+    restart: unless-stopped
+
+volumes:
+  etcd-data:
+  containerd-data:
+  kubelet-data:
+  k8s-pki:
+  k8s-configs:
+  local-path-data:
