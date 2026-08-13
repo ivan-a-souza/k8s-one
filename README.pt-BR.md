@@ -4,7 +4,7 @@
 
 Cluster Kubernetes **completo de nó único**, construído **do zero** a partir dos componentes individuais — sem K3s, KIND, kubeadm ou qualquer distribuição pronta.
 
-Empacotado numa **imagem distroless-style** via multi-stage build.
+Empacotado numa **imagem mínima baseada em Debian** via multi-stage build (sem package manager em runtime).
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -20,8 +20,9 @@ Empacotado numa **imagem distroless-style** via multi-stage build.
 │  │containerd│  │   runc   │                      │
 │  └──────────┘  └──────────┘                      │
 │                                                  │
-│  CNI: Calico  │  DNS: CoreDNS  │  SC: local-path │
-│         Ingress: HAProxy (Ports 8080/8443)       │
+│  CNI: Cilium  │  DNS: CoreDNS                    │
+│  Storage: Rook-Ceph (RBD + CephFS)               │
+│  Ingress: HAProxy (Portas host 8082/8443)        │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -41,6 +42,7 @@ Empacotado numa **imagem distroless-style** via multi-stage build.
 - [PKI e Certificados](#pki-e-certificados)
 - [Networking](#networking)
 - [Storage](#storage)
+- [Problemas Conhecidos](#problemas-conhecidos)
 - [Customização](#customização)
 - [Troubleshooting](#troubleshooting)
 - [Requisitos](#requisitos)
@@ -57,7 +59,7 @@ docker compose build
 # Start
 docker compose up -d
 
-# Acompanhar inicialização (~90s na primeira vez)
+# Acompanhar inicialização (~2-3 min na primeira vez)
 docker compose logs -f
 
 # Obter kubeconfig
@@ -76,10 +78,14 @@ NAME      STATUS   ROLES    AGE   VERSION
 k8s-one   Ready    <none>   2m    v1.36.0
 
 NAMESPACE            NAME                                       READY   STATUS
-kube-system          calico-kube-controllers-...                 1/1     Running
-kube-system          calico-node-...                             1/1     Running
+kube-system          cilium-operator-...                          1/1     Running
+kube-system          cilium-...                                   1/1     Running
 kube-system          coredns-...                                 1/1     Running
-local-path-storage   local-path-provisioner-...                  1/1     Running
+rook-ceph            rook-ceph-operator-...                       1/1     Running
+rook-ceph            rook-ceph-mon-a-...                          1/1     Running
+rook-ceph            rook-ceph-mgr-a-...                          1/1     Running
+rook-ceph            rook-ceph-osd-0-...                          1/1     Running
+haproxy-controller   haproxy-kubernetes-ingress-...               1/1     Running
 ```
 
 ---
@@ -100,16 +106,19 @@ Todos os binários são baixados de fontes oficiais no build. Nenhum componente 
 | **containerd** | 1.7.27 | github.com/containerd | Container runtime (CRI) |
 | **runc** | v1.2.6 | github.com/opencontainers | OCI runtime |
 | **CNI plugins** | v1.6.2 | github.com/containernetworking | Plugins de rede base |
-| **Calico** | v3.29.2 | projectcalico/calico | CNI — networking + network policy |
+| **Cilium** | v1.19.5 | github.com/cilium/cilium | CNI — networking + network policy (eBPF) |
+| **Cilium CLI** | v0.19.4 | github.com/cilium/cilium-cli | Instalação & gerenciamento do Cilium |
 | **CoreDNS** | v1.12.0 | registry.k8s.io | DNS do cluster |
-| **local-path-provisioner** | v0.0.35 | rancher/local-path-provisioner | Dynamic PV provisioning via hostPath |
-| **HAProxy Ingress** | latest | haproxytech/kubernetes-ingress | Ingress Controller |
+| **Rook** | v1.20.3 | github.com/rook/rook | Operador do Ceph (CRDs, operator, CSI) |
+| **Ceph** | v20.2.2 | quay.io/ceph/ceph | Daemons de storage (mon, mgr, osd, mds) |
+| **Ceph CSI** | v3.17.0 | quay.io/cephcsi | Drivers CSI (RBD block + CephFS) |
+| **HAProxy Ingress** | pinado por digest | haproxytech/kubernetes-ingress | Ingress Controller (HAProxy 3.2.21) |
 
 ---
 
 ## Arquitetura
 
-### Multi-Stage Build (Distroless)
+### Multi-Stage Build (Runtime mínimo)
 
 ```
 ┌─────────────────────────────────────┐
@@ -117,32 +126,30 @@ Todos os binários são baixados de fontes oficiais no build. Nenhum componente 
 │                                     │
 │  • curl, tar, gzip                  │
 │  • Download de todos os binários    │
-│  • Download dos manifests           │
+│  • Download dos manifests do Rook   │
 │  • Descartado no build final        │
 └──────────────┬──────────────────────┘
                │ COPY binários
                ▼
 ┌─────────────────────────────────────┐
-│  Stage 2: Runtime (alpine:3.21)     │
+│  Stage 2: Runtime (debian:bookworm) │
 │                                     │
-│  • iptables, conntrack, iproute2    │
-│  • openssl, socat, util-linux       │
-│  • gcompat (glibc compat)           │
-│  • SEM apk (removido no build)      │
-│  • SEM docs, man pages, caches      │
-│  • = Imagem "distroless-style"      │
+│  • bash, openssl, iptables, udev    │
+│  • losetup, socat, conntrack        │
+│  • apt/dpkg removidos no build      │
+│  • = imagem mínima, sem pkg manager │
 └─────────────────────────────────────┘
 ```
 
-A imagem final **não possui package manager** — `apk` é removido após instalar as dependências de runtime. Isso elimina a possibilidade de instalar pacotes em runtime, reduzindo a superfície de ataque.
+A imagem final **não possui package manager** — `apt`/`dpkg` são removidos após instalar as dependências de runtime, reduzindo a superfície de ataque.
 
 ### Processo de Inicialização
 
-O `entrypoint.sh` orquestra **7 processos** que rodam simultaneamente dentro do container:
+O `entrypoint.sh` orquestra os processos do control-plane, o loop device do OSD do Ceph e a aplicação dos manifests:
 
 ```
 entrypoint.sh
-├── setup_mounts()        # mount --make-rshared /, /sys, bpf
+├── setup_mounts()        # mount --make-rshared /, /sys, bpf (Cilium)
 ├── detect_ip()           # detecta IP do container
 ├── generate_pki()        # gera 3 CAs + 11 certs + SA keys
 ├── generate_kubeconfigs() # gera 6 kubeconfigs
@@ -155,12 +162,17 @@ entrypoint.sh
 ├── kubelet
 ├── kube-proxy
 │
+├── setup_ceph_osd_loop() # cria/attach /dev/loop0 ← osd.img (30G sparse)
+├── start_udevd()         # udev + watcher de device-nodes RBD
+│
 └── apply_manifests() [background]
     ├── taint removal (permite workloads)
-    ├── kubectl apply calico.yaml
+    ├── cilium install (CNI, reinstalação limpa a cada boot)
     ├── aguarda Node Ready
     ├── kubectl apply coredns.yaml
-    ├── kubectl apply local-path-storage.yaml
+    ├── kubectl apply rook CRDs + common + CSI operator + operator
+    ├── patch ROOK_CEPH_ALLOW_LOOP_DEVICES=true (verificado)
+    ├── kubectl apply rook-ceph-cluster.yaml (cluster Ceph + pools + SC)
     └── kubectl apply haproxy-ingress.yaml
 ```
 
@@ -168,7 +180,7 @@ entrypoint.sh
 
 ## Volumes Persistentes
 
-Todos os dados de estado são montados em Docker volumes nomeados, garantindo persistência entre restarts:
+Todo o estado do cluster é montado em Docker volumes nomeados, garantindo persistência entre restarts:
 
 | Volume | Mount no Container | Conteúdo |
 |---|---|---|
@@ -177,19 +189,21 @@ Todos os dados de estado são montados em Docker volumes nomeados, garantindo pe
 | `kubelet-data` | `/var/lib/kubelet` | Estado do kubelet e pods |
 | `k8s-pki` | `/etc/kubernetes/pki` | Certificados TLS (CAs, certs, keys) |
 | `k8s-configs` | `/etc/kubernetes` | Kubeconfigs (admin, scheduler, etc.) |
-| `local-path-data` | `/opt/local-path-provisioner` | PersistentVolumes criados pelo local-path |
 
 Além dos volumes nomeados, o container monta:
 
 | Host Path | Container Path | Modo | Motivo |
 |---|---|---|---|
-| `/sys` | `/sys` | `rw` | Calico BPF, cgroups |
+| `/sys` | `/sys` | `rw` | Cilium BPF, cgroups |
 | `/lib/modules` | `/lib/modules` | `ro` | Módulos do kernel (iptables, etc.) |
+| `./rook-data/` | `/var/lib/rook` | `rw` | Dados do Ceph: imagem OSD + keyrings (**gitignored!**) |
+
+> ⚠️ `rook-data/` contém os **keyrings do Ceph** e a imagem do OSD (`osd.img`, 30G sparse). Está **gitignored** — nunca commitar.
 
 ### Limpar tudo
 
 ```bash
-docker compose down -v   # remove container + todos os volumes
+docker compose down -v   # remove container + volumes nomeados (bind mount rook-data/ é mantido)
 ```
 
 ---
@@ -204,8 +218,8 @@ Todas as versões são configuráveis via build args no Dockerfile:
 # Usar uma versão específica do Kubernetes
 docker compose build --build-arg KUBE_VERSION=v1.35.0
 
-# Usar uma versão específica do Calico
-docker compose build --build-arg CALICO_VERSION=v3.28.0
+# Usar uma versão específica do Cilium
+docker compose build --build-arg CILIUM_VERSION=v1.18.0
 
 # Build para arm64 (não testado)
 docker compose build --build-arg TARGETARCH=arm64
@@ -218,21 +232,25 @@ docker compose build --build-arg TARGETARCH=arm64
 | `CONTAINERD_VERSION` | `1.7.27` | Versão do containerd |
 | `RUNC_VERSION` | `v1.2.6` | Versão do runc |
 | `CNI_VERSION` | `v1.6.2` | Versão dos CNI plugins |
-| `CALICO_VERSION` | `v3.29.2` | Versão do Calico |
-| `LOCAL_PATH_VERSION` | `v0.0.35` | Versão do local-path-provisioner |
+| `CILIUM_VERSION` | `v1.19.5` | Versão do Cilium |
+| `CILIUM_CLI_VERSION` | `v0.19.4` | Versão do Cilium CLI |
+| `ROOK_VERSION` | `v1.20.3` | Versão do operador Rook (manifests baixados dessa tag) |
 | `TARGETARCH` | `amd64` | Arquitetura alvo |
+
+> A **versão da imagem do Ceph** é definida em `manifests/rook-ceph-cluster.yaml` (`quay.io/ceph/ceph:v20.2.2` — pinada na versão oficialmente testada com o Rook 1.20.3; **não** usar a tag flutuante `:v20`).
 
 ### Variáveis de Ambiente (runtime)
 
 | Variável | Default | Descrição |
 |---|---|---|
 | `NODE_NAME` | `k8s-one` | Nome do nó no cluster |
+| `ROOK_OSD_SIZE` | `30G` | Tamanho da imagem sparse do OSD (`/var/lib/rook/osd.img`) |
 
 ### Parâmetros de Rede (entrypoint.sh)
 
 | Parâmetro | Valor | Descrição |
 |---|---|---|
-| `CLUSTER_CIDR` | `192.168.0.0/16` | CIDR dos pods (compatível com Calico default) |
+| `CLUSTER_CIDR` | `192.168.0.0/16` | CIDR dos pods (Cilium auto-detecta do controller-manager) |
 | `SERVICE_CIDR` | `10.96.0.0/12` | CIDR dos ClusterIPs |
 | `CLUSTER_DNS` | `10.96.0.10` | IP do CoreDNS |
 
@@ -280,7 +298,7 @@ kubectl run nginx --image=nginx:alpine --port=80
 kubectl get pods -w
 ```
 
-### PVC com local-path-provisioner
+### PVC com Ceph RBD (block, ReadWriteOnce)
 
 ```yaml
 apiVersion: v1
@@ -289,7 +307,7 @@ metadata:
   name: my-data
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: local-path
+  storageClassName: ceph-block
   resources:
     requests:
       storage: 1Gi
@@ -318,7 +336,24 @@ kubectl logs app
 # Hello from K8s-One!
 ```
 
-### Network Policy com Calico
+### PVC com CephFS (ReadWriteMany)
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-data
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: cephfs
+  resources:
+    requests:
+      storage: 100Mi
+```
+
+Qualquer número de pods no nó pode montar `shared-data` simultaneamente (validado: 2 réplicas lendo/escrevendo o mesmo volume).
+
+### Network Policy com Cilium
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -364,6 +399,7 @@ spec:
   - port: 80
     targetPort: 80
   type: ClusterIP
+```
 
 ### Ingress com HAProxy
 
@@ -390,8 +426,7 @@ spec:
 
 ```bash
 kubectl apply -f ingress.yaml
-curl -H "Host: meu-app.local" http://localhost:8080/
-```
+curl -H "Host: meu-app.local" http://localhost:8082/
 ```
 
 ---
@@ -400,20 +435,23 @@ curl -H "Host: meu-app.local" http://localhost:8080/
 
 ```
 k8s-one/
-├── Dockerfile                          # Multi-stage build (builder + runtime)
+├── Dockerfile                          # Multi-stage build (builder alpine + runtime debian)
 ├── docker-compose.yaml                 # Execução com volumes persistentes
-├── README.md                           # Este arquivo
+├── README.md                           # Documentação (Inglês)
+├── README.pt-BR.md                     # Documentação (Português)
 │
 ├── scripts/
-│   └── entrypoint.sh                   # Orquestração: PKI, configs, processos, manifests
+│   ├── entrypoint.sh                   # Orquestração: PKI, configs, processos, manifests
+│   └── rbd-device-watch.sh             # Cria device-nodes /dev/rbdN (krbd com noudev)
 │
 ├── configs/
 │   └── containerd-config.toml          # containerd: runc + cgroupfs + overlayfs
 │
 └── manifests/
-    └── coredns.yaml                    # CoreDNS (ServiceAccount, RBAC, Deployment, Service)
-    # calico.yaml                       # (baixado no build — projectcalico/calico)
-    # local-path-storage.yaml           # (baixado no build — rancher/local-path-provisioner)
+    ├── coredns.yaml                    # CoreDNS (ServiceAccount, RBAC, Deployment, Service)
+    ├── haproxy-ingress.yaml            # HAProxy Ingress Controller (imagem pinada por digest)
+    └── rook-ceph-cluster.yaml          # CephCluster CR (single-node, OSD loop) + pools + SCs
+    # rook-crds/common/csi-operator/operator.yaml  (baixados no build do Rook v1.20.3)
 ```
 
 ---
@@ -429,19 +467,15 @@ Timeline típica da primeira execução (cold start, sem cache de imagens):
  1s   ▶ containerd start → socket ready
  2s   ▶ etcd start → health check OK
  5s   ▶ kube-apiserver start → /healthz OK
- 7s   ▶ kube-controller-manager start
- 7s   ▶ kube-scheduler start
- 7s   ▶ kubelet start → node registrado
- 8s   ▶ kube-proxy start
- 8s   ▶ kubectl apply calico.yaml
-30s   ▶ Calico images pulled + calico-node Running
+ 7s   ▶ kube-controller-manager / scheduler / kubelet / kube-proxy
+ 8s   ▶ Attach do loop device do OSD (/dev/loop0 ← osd.img) + udevd
+10s   ▶ cilium install (reinstalação limpa a cada boot)
 35s   ▶ Node Ready ✓
-35s   ▶ kubectl apply coredns.yaml
-40s   ▶ kubectl apply local-path-storage.yaml
-90s   ▶ Todos os pods Running ✓
+40s   ▶ CoreDNS, operador Rook, cluster Ceph, HAProxy aplicados
+~2-3m ▶ Rook-Ceph saudável (mon, mgr, osd) — Ceph cluster Ready
 ```
 
-> Em restarts subsequentes (imagens já em cache), o tempo total cai para ~30-40s.
+> Em restarts subsequentes (imagens já em cache), o boot cai para ~1-2 min. Os dados do OSD do Ceph sobrevivem via `rook-data/`.
 
 ---
 
@@ -486,14 +520,16 @@ Todos os certificados têm validade de **10 anos** (3650 dias).
 
 ## Networking
 
-### Calico
+### Cilium
 
-- **Modo**: VXLAN (default do manifest)
-- **Pod CIDR**: `192.168.0.0/16`
-- **Network Policy**: ✅ suportado
-- **IPAM**: Calico IPAM
+- **Datapath**: eBPF
+- **Pod CIDR**: `192.168.0.0/16` (auto-detectado do kube-controller-manager)
+- **Network Policy**: ✅ suportado (CiliumNetworkPolicy + k8s NetworkPolicy)
+- **IPAM**: cluster-pool (padrão)
+- **kube-proxy replacement**: desabilitado (kube-proxy roda junto)
+- **Hubble**: ✅ observabilidade & monitoramento
 
-O Calico é instalado via manifest direto (sem Tigera Operator), o que simplifica a instalação mas requer gestão manual de upgrades.
+O Cilium é instalado via Cilium CLI, que gerencia o Helm chart e fornece monitoramento de status. Ele é **totalmente desinstalado e reinstalado a cada boot** (o datapath BPF em memória não sobrevive ao restart do container).
 
 ### kube-proxy
 
@@ -510,20 +546,38 @@ O Calico é instalado via manifest direto (sem Tigera Operator), o que simplific
 
 ## Storage
 
-### local-path-provisioner
+### Rook-Ceph
 
-- **StorageClass**: `local-path` (default)
-- **Provisioner**: `rancher.io/local-path`
-- **Reclaim Policy**: `Delete`
-- **Bind Mode**: `WaitForFirstConsumer`
-- **Path no host**: `/opt/local-path-provisioner` (persistido em volume Docker)
+O Ceph é implantado pelo Rook como cluster de nó único com **um OSD em loop device** (imagem sparse de 30G, `osd.img`) — nenhum disco do host é tocado.
+
+- **Operador**: Rook v1.20.3 · **Ceph**: v20.2.2 (pinada — ver Problemas Conhecidos)
+- **OSD**: 1 OSD bluestore em `/dev/loop0` ← `/var/lib/rook/osd.img` (persistido em `./rook-data/`)
+- **Data path**: `/var/lib/rook` (bind mount)
+
+| StorageClass | Provisioner | Access | Pool | Uso |
+|---|---|---|---|---|
+| `ceph-block` (**default**) | `rook-ceph.rbd.csi.ceph.com` | RWO | `replicapool` | Volumes block (RBD) |
+| `cephfs` | `rook-ceph.cephfs.csi.ceph.com` | **RWX** | `cephfs-data0` | Volumes de filesystem compartilhado |
 
 ```bash
-# Verificar StorageClass
 kubectl get sc
-# NAME                   PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE
-# local-path (default)   rancher.io/local-path   Delete          WaitForFirstConsumer
+# NAME                 PROVISIONER                        RECLAIMPOLICY  VOLUMEBINDINGMODE
+# ceph-block (default) rook-ceph.rbd.csi.ceph.com         Delete         Immediate
+# cephfs               rook-ceph.cephfs.csi.ceph.com      Delete         Immediate
 ```
+
+Replicação `size: 1` (nó único) — os dados **não são redundantes**; o OSD vive num loop file no disco do host. Faça backup de `rook-data/` se os dados importarem.
+
+---
+
+## Problemas Conhecidos
+
+### Módulo mgr "rook" desabilitado (workaround)
+
+- **Sintoma:** crash-loop do `ceph mgr` a cada ~15s: `NotImplementedError` em `node_proxy_fullreport` (crash dumps enchendo o data dir).
+- **Causa:** Ceph v20.2.3 + Rook 1.20.3 — o módulo `prometheus` do mgr do Ceph chama `node_proxy_fullreport()`, que o módulo rook não implementa. Upstream: [rook/rook#18124](https://github.com/rook/rook/issues/18124) / [tracker 79106](https://tracker.ceph.com/issues/79106).
+- **Estado atual:** o módulo mgr `rook` está **desabilitado** (`spec.mgr.modules[0].enabled: false` em `rook-ceph-cluster.yaml`) — workaround recomendado pelos mantenedores. O operador Rook **não** depende do módulo; só a CLI `ceph orch`/integração com dashboard é perdida.
+- **Reabilitar** quando o fix upstream ([ceph/ceph#70967](https://github.com/ceph/ceph/pull/70967)) for lançado.
 
 ---
 
@@ -546,11 +600,18 @@ Edite `configs/containerd-config.toml`:
   SystemdCgroup = false   # true se o host usa systemd cgroups
 ```
 
+### Trocar o tamanho do OSD
+
+```bash
+docker compose build --build-arg ROOK_OSD_SIZE=50G   # env var em runtime; afeta osd.img no primeiro boot
+```
+
 ### Trocar o Pod CIDR
 
 Altere em **dois lugares**:
 1. `scripts/entrypoint.sh` → `CLUSTER_CIDR`
-2. Calico manifest (rebuild necessário ou editar o manifest baixado)
+2. Comando de instalação do Cilium (entrypoint.sh → `cilium install --set ipam.operator.clusterPoolIPv4PodCIDRList=...`)
+   Rebuild necessário.
 
 ---
 
@@ -573,7 +634,7 @@ kubectl describe pod <pod-name> -n <namespace>
 ```
 
 Causas comuns:
-- Calico ainda não instalou o CNI → aguardar calico-node ficar Running
+- Cilium ainda não instalou o CNI → aguardar cilium-agent ficar Running
 - Erro de mount propagation → verificar se `/sys` está montado rw
 
 ### CoreDNS CrashLoopBackOff
@@ -586,6 +647,17 @@ Causas comuns:
 - Loop detection → já resolvido com forward para 8.8.8.8
 - Corefile syntax error → verificar `manifests/coredns.yaml`
 
+### OSD não criado após reboot (0 OSDs)
+
+```bash
+docker exec k8s-one losetup -a          # deve mostrar /dev/loop0 ← /var/lib/rook/osd.img
+docker exec k8s-one kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get pod -l app=rook-ceph-osd
+```
+
+Causas comuns:
+- Loop device não attachado → `losetup /dev/loop0 /var/lib/rook/osd.img` e depois deletar o job `rook-ceph-osd-prepare` + reiniciar o operator
+- `ROOK_CEPH_ALLOW_LOOP_DEVICES` diferente de `true` → verificar configmap `rook-ceph-operator-config`
+
 ### Node NotReady
 
 ```bash
@@ -593,7 +665,7 @@ kubectl describe node k8s-one
 ```
 
 Causas comuns:
-- CNI não instalado → Calico ainda inicializando
+- CNI não instalado → Cilium ainda inicializando
 - kubelet não consegue se comunicar com apiserver → verificar certs
 
 ### Ver logs de um componente específico
@@ -611,8 +683,9 @@ docker compose logs -f | grep etcd
 ### Reset completo
 
 ```bash
-docker compose down -v   # remove container + todos os volumes
+docker compose down -v   # remove container + volumes nomeados (mantém ./rook-data/)
 docker compose up -d     # fresh start
+# Para apagar também os dados do Ceph: rm -rf rook-data/*  (irreversível!)
 ```
 
 ---
@@ -625,9 +698,9 @@ docker compose up -d     # fresh start
 |---|---|---|
 | **Docker** | 24.0+ | 27.0+ |
 | **Docker Compose** | v2.20+ | v2.30+ |
-| **RAM** | 2 GB | 4 GB |
+| **RAM** | 4 GB | 8 GB |
 | **CPU** | 2 cores | 4 cores |
-| **Disco** | 5 GB (imagem) | 10 GB+ |
+| **Disco** | 10 GB (imagem + OSD sparse 30G) | 20 GB+ |
 | **OS** | Linux (kernel 5.10+) | Linux (kernel 6.x) |
 | **Arch** | amd64 | amd64 |
 
@@ -636,8 +709,8 @@ docker compose up -d     # fresh start
 | Porta | Protocolo | Uso |
 |---|---|---|
 | `6443` | TCP | Kubernetes API Server |
-| `8080` | TCP | HAProxy Ingress HTTP |
-| `8443` | TCP | HAProxy Ingress HTTPS |
+| `8082` | TCP | HAProxy Ingress HTTP (→ NodePort 30080) |
+| `8443` | TCP | HAProxy Ingress HTTPS (→ NodePort 30443) |
 
 ---
 
@@ -645,7 +718,8 @@ docker compose up -d     # fresh start
 
 - **Não é HA**: nó único, sem redundância. etcd, apiserver, etc. são single-instance.
 - **Não para produção**: destinado a desenvolvimento, testes, CI/CD, laboratório.
-- **Privileged mode**: o container roda com `--privileged` (necessário para kubelet/containerd).
+- **Storage sem redundância**: replicação Ceph `size: 1`, OSD único em loop file.
+- **Privileged mode**: o container roda com `--privileged` (necessário para kubelet/containerd + loop devices).
 - **Apenas amd64**: arm64 pode funcionar com `--build-arg TARGETARCH=arm64` mas não foi testado.
 - **Sem systemd**: usa `cgroupfs` como cgroup driver (sem systemd dentro do container).
 - **Cert rotation**: desabilitada. Certificados duram 10 anos. Para clusters de longa duração, considere implementar rotação.
