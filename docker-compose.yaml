@@ -19,7 +19,7 @@ services:
       - ./data/kubelet:/var/lib/kubelet
       - ./data/pki:/etc/kubernetes/pki
       - ./data/kubernetes:/etc/kubernetes
-      - ./rook-data:/var/lib/rook
+      - ./data/rook:/var/lib/rook
     ports:
       - "6443:6443"
       - "8082:30080"

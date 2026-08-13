@@ -189,7 +189,7 @@ Todo o estado do cluster é armazenado em **bind mounts** em `./data/`, garantin
 | `./data/kubelet/` | `/var/lib/kubelet` | Estado do kubelet e pods |
 | `./data/pki/` | `/etc/kubernetes/pki` | Certificados TLS (CAs, certs, keys) |
 | `./data/kubernetes/` | `/etc/kubernetes` | Kubeconfigs (admin, scheduler, etc.) |
-| `./rook-data/` | `/var/lib/rook` | Dados do Ceph: imagem OSD + keyrings |
+| `./data/rook/` | `/var/lib/rook` | Dados do Ceph: imagem OSD + keyrings |
 
 Além dos bind mounts, o container monta paths do sistema host:
 
@@ -198,13 +198,13 @@ Além dos bind mounts, o container monta paths do sistema host:
 | `/sys` | `/sys` | `rw` | Cilium BPF, cgroups |
 | `/lib/modules` | `/lib/modules` | `ro` | Módulos do kernel (iptables, etc.) |
 
-> ⚠️ `./data/` e `./rook-data/` contêm segredos do cluster (keyrings do Ceph, chaves privadas da PKI, kubeconfigs). Ambos estão **gitignored** — nunca commitar.
+> ⚠️ `./data/` e `./data/rook/` contêm segredos do cluster (keyrings do Ceph, chaves privadas da PKI, kubeconfigs). Ambos estão **gitignored** — nunca commitar.
 
 ### Limpar tudo
 
 ```bash
-docker compose down -v   # remove container + volumes nomeados (bind mounts em ./data/ e ./rook-data/ são mantidos)
-# Para apagar totalmente os dados do cluster: rm -rf data/* rook-data/*   (irreversível!)
+docker compose down -v   # remove container + volumes nomeados (bind mounts em ./data/ e ./data/rook/ são mantidos)
+# Para apagar totalmente os dados do cluster: rm -rf data/* data/rook/*   (irreversível!)
 ```
 
 ---
@@ -476,7 +476,7 @@ Timeline típica da primeira execução (cold start, sem cache de imagens):
 ~2-3m ▶ Rook-Ceph saudável (mon, mgr, osd) — Ceph cluster Ready
 ```
 
-> Em restarts subsequentes (imagens já em cache), o boot cai para ~1-2 min. Os dados do OSD do Ceph sobrevivem via `rook-data/`.
+> Em restarts subsequentes (imagens já em cache), o boot cai para ~1-2 min. Os dados do OSD do Ceph sobrevivem via `data/rook/`.
 
 ---
 
@@ -552,7 +552,7 @@ O Cilium é instalado via Cilium CLI, que gerencia o Helm chart e fornece monito
 O Ceph é implantado pelo Rook como cluster de nó único com **um OSD em loop device** (imagem sparse de 30G, `osd.img`) — nenhum disco do host é tocado.
 
 - **Operador**: Rook v1.20.3 · **Ceph**: v20.2.2 (pinada — ver Problemas Conhecidos)
-- **OSD**: 1 OSD bluestore em `/dev/loop0` ← `/var/lib/rook/osd.img` (persistido em `./rook-data/`)
+- **OSD**: 1 OSD bluestore em `/dev/loop0` ← `/var/lib/rook/osd.img` (persistido em `./data/rook/`)
 - **Data path**: `/var/lib/rook` (bind mount)
 
 | StorageClass | Provisioner | Access | Pool | Uso |
@@ -567,7 +567,7 @@ kubectl get sc
 # cephfs               rook-ceph.cephfs.csi.ceph.com      Delete         Immediate
 ```
 
-Replicação `size: 1` (nó único) — os dados **não são redundantes**; o OSD vive num loop file no disco do host. Faça backup de `rook-data/` se os dados importarem.
+Replicação `size: 1` (nó único) — os dados **não são redundantes**; o OSD vive num loop file no disco do host. Faça backup de `data/rook/` se os dados importarem.
 
 ---
 
@@ -684,9 +684,9 @@ docker compose logs -f | grep etcd
 ### Reset completo
 
 ```bash
-docker compose down -v   # remove container + volumes nomeados (bind mounts ./data/ e ./rook-data/ são mantidos)
+docker compose down -v   # remove container + volumes nomeados (bind mounts ./data/ e ./data/rook/ são mantidos)
 docker compose up -d     # fresh start
-# Para apagar também os dados do cluster: rm -rf data/* rook-data/*  (irreversível!)
+# Para apagar também os dados do cluster: rm -rf data/* data/rook/*  (irreversível!)
 ```
 
 ---

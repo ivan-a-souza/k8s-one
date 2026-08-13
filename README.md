@@ -189,7 +189,7 @@ All cluster state is stored in **bind mounts** under `./data/`, ensuring persist
 | `./data/kubelet/` | `/var/lib/kubelet` | Kubelet state and pods |
 | `./data/pki/` | `/etc/kubernetes/pki` | TLS certificates (CAs, certs, keys) |
 | `./data/kubernetes/` | `/etc/kubernetes` | Kubeconfigs (admin, scheduler, etc.) |
-| `./rook-data/` | `/var/lib/rook` | Ceph data: OSD image + keyrings |
+| `./data/rook/` | `/var/lib/rook` | Ceph data: OSD image + keyrings |
 
 Additionally, the container bind-mounts host system paths:
 
@@ -198,13 +198,13 @@ Additionally, the container bind-mounts host system paths:
 | `/sys` | `/sys` | `rw` | Cilium BPF, cgroups |
 | `/lib/modules` | `/lib/modules` | `ro` | Kernel modules (iptables, etc.) |
 
-> ⚠️ `./data/` and `./rook-data/` contain cluster secrets (Ceph keyrings, PKI private keys, kubeconfigs). Both are **gitignored** — never commit them.
+> ⚠️ `./data/` and `./data/rook/` contain cluster secrets (Ceph keyrings, PKI private keys, kubeconfigs). Both are **gitignored** — never commit them.
 
 ### Clean everything
 
 ```bash
-docker compose down -v   # removes container + named volumes (bind mounts under ./data/ and ./rook-data/ are kept)
-# To fully wipe cluster data: rm -rf data/* rook-data/*   (irreversible!)
+docker compose down -v   # removes container + named volumes (bind mounts under ./data/ and ./data/rook/ are kept)
+# To fully wipe cluster data: rm -rf data/* data/rook/*   (irreversible!)
 ```
 
 ---
@@ -476,7 +476,7 @@ Typical timeline for a first run (cold start, no image cache):
 ~2-3m ▶ Rook-Ceph healthy (mon, mgr, osd) — Ceph cluster Ready
 ```
 
-> On subsequent restarts (images already cached), boot drops to ~1-2 min. The Ceph OSD data survives via `rook-data/`.
+> On subsequent restarts (images already cached), boot drops to ~1-2 min. The Ceph OSD data survives via `data/rook/`.
 
 ---
 
@@ -552,7 +552,7 @@ Cilium is installed via the Cilium CLI, which manages the Helm chart and provide
 Ceph is deployed by Rook as a single-node cluster with **one OSD on a loop device** (30G sparse image, `osd.img`) — no host disks are touched.
 
 - **Operator**: Rook v1.20.3 · **Ceph**: v20.2.2 (pinned — see Known Issues)
-- **OSD**: 1 bluestore OSD on `/dev/loop0` ← `/var/lib/rook/osd.img` (persisted in `./rook-data/`)
+- **OSD**: 1 bluestore OSD on `/dev/loop0` ← `/var/lib/rook/osd.img` (persisted in `./data/rook/`)
 - **Data path**: `/var/lib/rook` (bind mount)
 
 | StorageClass | Provisioner | Access | Pool | Use |
@@ -567,7 +567,7 @@ kubectl get sc
 # cephfs               rook-ceph.cephfs.csi.ceph.com      Delete         Immediate
 ```
 
-Replication is `size: 1` (single node) — data is **not redundant**; the OSD lives on a loop file on the host disk. Back up `rook-data/` if the data matters.
+Replication is `size: 1` (single node) — data is **not redundant**; the OSD lives on a loop file on the host disk. Back up `data/rook/` if the data matters.
 
 ---
 
@@ -684,9 +684,9 @@ docker compose logs -f | grep etcd
 ### Full reset
 
 ```bash
-docker compose down -v   # removes container + all named volumes (keeps ./rook-data/)
+docker compose down -v   # removes container + all named volumes (keeps ./data/rook/)
 docker compose up -d     # fresh start
-# To also wipe Ceph data: rm -rf rook-data/*  (irreversible!)
+# To also wipe Ceph data: rm -rf data/rook/*  (irreversible!)
 ```
 
 ---
