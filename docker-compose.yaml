@@ -20,6 +20,7 @@ services:
       - ./data/pki:/etc/kubernetes/pki
       - ./data/kubernetes:/etc/kubernetes
       - ./data/rook:/var/lib/rook
+      - ./data/tiles:/var/lib/tiles
     ports:
       - "6443:6443"
       - "8082:30080"

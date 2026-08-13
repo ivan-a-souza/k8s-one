@@ -1,0 +1,116 @@
+# Tileserver GL — mapas (df + zurich) migrado da infra Docker para o k8s
+# Dados: /var/lib/tiles dentro do node k8s-one (hostPath) — mbtiles copiados
+# do diretório ~/Projects/infra/tileserver/data/
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: tiles-data
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: hostpath-tiles
+  hostPath:
+    path: /var/lib/tiles
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tiles-data
+  namespace: apps
+spec:
+  accessModes:
+    - ReadOnlyMany
+  storageClassName: hostpath-tiles
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tileserver
+  namespace: apps
+  labels:
+    app: tileserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tileserver
+  template:
+    metadata:
+      labels:
+        app: tileserver
+    spec:
+      containers:
+        - name: tileserver
+          image: maptiler/tileserver-gl-light:latest
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: tiles-data
+              mountPath: /data
+          resources:
+            limits:
+              memory: 256Mi
+              cpu: "0.5"
+            requests:
+              memory: 128Mi
+              cpu: "0.25"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: tiles-data
+          persistentVolumeClaim:
+            claimName: tiles-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tileserver
+  namespace: apps
+  labels:
+    app: tileserver
+spec:
+  selector:
+    app: tileserver
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tileserver
+  namespace: apps
+  annotations:
+    haproxy.org/ingress.class: haproxy
+spec:
+  rules:
+    - host: tiles.naesquina.com.br
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tileserver
+                port:
+                  number: 80
