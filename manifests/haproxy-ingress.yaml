@@ -150,7 +150,7 @@ spec:
       serviceAccountName: haproxy-kubernetes-ingress
       containers:
       - name: haproxy-ingress
-        image: haproxytech/kubernetes-ingress
+        image: haproxytech/kubernetes-ingress@sha256:3cdf2bb20dfb6cf31993df4ffa68e7c947f6119e98ad6982bfff6ee091c8646d
         args:
           - --configmap=haproxy-controller/haproxy-kubernetes-ingress
         securityContext:
