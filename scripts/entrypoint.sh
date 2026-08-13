@@ -31,7 +31,7 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# ── Setup mount propagation (required for Calico BPF + kubelet) ───────────
+# ── Setup mount propagation (required for Cilium BPF + kubelet) ───────────
 setup_mounts() {
   mount --make-rshared / 2>/dev/null || true
   mount --make-rshared /sys 2>/dev/null || true
@@ -353,6 +353,101 @@ start_kube_proxy() {
   log "kube-proxy started."
 }
 
+# ── Setup loop device for Ceph OSD ────────────────────────────────────────
+# Creates a 30G sparse file in /var/lib/rook and attaches it as a loop device
+# so the Rook OSD has a raw block device without touching host disks.
+setup_ceph_osd_loop() {
+  local img="/var/lib/rook/osd.img"
+  local size="${ROOK_OSD_SIZE:-30G}"
+
+  if ! command -v losetup >/dev/null 2>&1; then
+    log "WARNING: losetup not found, skipping OSD loop device"
+    return 0
+  fi
+
+  mkdir -p /var/lib/rook
+
+  # Create sparse image if missing
+  if [ ! -f "$img" ]; then
+    log "Creating OSD sparse image ($size)..."
+    truncate -s "$size" "$img"
+  fi
+
+  # Attach loop device if not already attached.
+  # NOTE: rook-ceph-cluster.yaml declares the OSD device EXCLUSIVELY as
+  # /dev/loop0, so attach to that exact device. Using `losetup -f` (first free
+  # loop) could pick loop1+ and the OSD would silently never find its disk.
+  if ! losetup -j "$img" >/dev/null 2>&1; then
+    log "Attaching /dev/loop0 to $img..."
+    if ! losetup /dev/loop0 "$img" 2>&1; then
+      die "FATAL: cannot attach /dev/loop0 to $img (device busy with another file?)"
+    fi
+  fi
+
+  # Verify the attach REALLY happened: losetup -j exits 0 ONLY when the image
+  # is actually associated with a loop device. Never pipe to head/&& here
+  # (head always exits 0, which silently masked a failed attach before).
+  if losetup -j "$img" >/dev/null 2>&1; then
+    log "OSD loop device ready"
+  else
+    die "FATAL: OSD loop device NOT attached ($img has no loop backing)"
+  fi
+}
+
+# ── Start udevd (required by ceph-volume for device identification) ───────
+start_udevd() {
+  if command -v /usr/lib/systemd/systemd-udevd >/dev/null 2>&1; then
+    local udevd=/usr/lib/systemd/systemd-udevd
+  elif command -v /sbin/udevd >/dev/null 2>&1; then
+    local udevd=/sbin/udevd
+  elif command -v udevd >/dev/null 2>&1; then
+    local udevd=udevd
+  else
+    log "WARNING: udevd not found, Ceph OSD may fail to detect devices"
+    return 0
+  fi
+
+  # Start udevd if not already running (comm is "systemd-udevd")
+  if ! grep -q systemd-udevd /proc/*/comm 2>/dev/null; then
+    log "Starting udevd..."
+    rm -rf /run/udev; mkdir -p /run/udev
+    # Fake systemctl so udevd doesn't try to talk to systemd
+    if [ ! -f /bin/systemctl ]; then
+      cat > /bin/systemctl << 'SYSTEMCTL'
+#!/bin/sh
+exit 0
+SYSTEMCTL
+      chmod +x /bin/systemctl
+    fi
+    "$udevd" --resolve-names=never --daemon 2>/dev/null || "$udevd" --daemon 2>/dev/null
+    sleep 2
+    if grep -q systemd-udevd /proc/*/comm 2>/dev/null; then
+      log "udevd started OK"
+    else
+      log "WARNING: udevd failed to start"
+    fi
+  fi
+
+  # Trigger uevents so /run/udev/data gets populated for the loop device
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm trigger --action=add --subsystem-match=block 2>/dev/null || true
+    udevadm settle --timeout=10 2>/dev/null || true
+  fi
+
+  # Start the RBD device-node watcher (krbd mounter uses --options noudev, so
+  # the kernel does not emit uevents and /dev/rbdN nodes are not auto-created)
+  if [ -x /usr/local/bin/rbd-device-watch.sh ]; then
+    # comm is truncated to 15 chars: "rbd-device-watc"
+    if ! grep -q rbd-device-watc /proc/*/comm 2>/dev/null; then
+      log "Starting RBD device watcher..."
+      /usr/local/bin/rbd-device-watch.sh >/tmp/rbd-watch.out 2>&1 &
+      sleep 1
+      grep -q rbd-device-watc /proc/*/comm 2>/dev/null && log "RBD device watcher started." \
+        || log "WARNING: RBD device watcher failed to start"
+    fi
+  fi
+}
+
 # ── Post-init: apply manifests ────────────────────────────────────────────
 apply_manifests() {
   export KUBECONFIG="$KUBE/admin.conf"
@@ -369,12 +464,27 @@ apply_manifests() {
   # Remove control-plane taint so workloads can be scheduled
   $kc taint nodes "$NODE_NAME" node-role.kubernetes.io/control-plane:NoSchedule- 2>/dev/null || true
 
-  # Apply Calico
-  log "Applying Calico manifest..."
-  $kc apply -f "$MANIFESTS/calico.yaml" --server-side 2>&1 | tail -5
-  log "Calico applied."
+  # Install Cilium. On every boot we fully uninstall + reinstall it: the
+  # in-memory BPF datapath does not survive a container restart, leaving the
+  # pod network broken (ClusterIP unreachable) even though pods report Running.
+  log "Installing Cilium CNI (clean reinstall)..."
+  cilium uninstall --kubeconfig "$KUBE/admin.conf" 2>/dev/null || true
+  rm -rf /sys/fs/bpf/cilium/devices/* 2>/dev/null || true
+  if ! cilium install \
+    --kubeconfig "$KUBE/admin.conf" \
+    --version v1.19.5 \
+    --set cluster.name="$NODE_NAME" \
+    --set cluster.id=1 \
+    --set kubeProxyReplacement=false \
+    --wait 2>&1; then
+    if ! $kc -n kube-system get ds cilium >/dev/null 2>&1; then
+      log "FATAL: Cilium is not available and install failed"
+      return 1
+    fi
+  fi
+  log "Cilium ready."
 
-  # Wait for node Ready (Calico will install CNI and make the node Ready)
+  # Wait for node Ready (Cilium will install CNI and make the node Ready)
   wait_for_node_ready
 
   # Apply CoreDNS
@@ -382,14 +492,46 @@ apply_manifests() {
   $kc apply -f "$MANIFESTS/coredns.yaml" 2>&1 | tail -3
   log "CoreDNS applied."
 
-  # Apply local-path-provisioner
-  log "Applying local-path-provisioner..."
-  $kc apply -f "$MANIFESTS/local-path-storage.yaml" 2>&1 | tail -3
+  # Deploy Rook-Ceph operator
+  log "Deploying Rook-Ceph operator..."
+  $kc apply -f "$MANIFESTS/rook-crds.yaml" 2>&1 | tail -2
+  $kc apply -f "$MANIFESTS/rook-common.yaml" 2>&1 | tail -2
+  $kc apply -f "$MANIFESTS/rook-csi-operator.yaml" 2>&1 | tail -2
 
-  # Set local-path as default StorageClass
-  $kc patch storageclass local-path \
-    -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' 2>/dev/null || true
-  log "local-path-provisioner applied (default StorageClass)."
+  # Wait for rook-ceph namespace to exist
+  local rook_tries=60
+  while [ $rook_tries -gt 0 ]; do
+    $kc get ns rook-ceph >/dev/null 2>&1 && break
+    sleep 2; rook_tries=$((rook_tries - 2))
+  done
+
+  $kc apply -f "$MANIFESTS/rook-operator.yaml" 2>&1 | tail -2
+
+  # Allow loop devices for OSD storage (required for the 30G loop device).
+  # NOTE: must run AFTER applying rook-operator.yaml, since that manifest ships
+  # its own rook-ceph-operator-config with ROOK_CEPH_ALLOW_LOOP_DEVICES=false.
+  $kc -n rook-ceph create configmap rook-ceph-operator-config \
+    --from-literal=ROOK_CEPH_ALLOW_LOOP_DEVICES=true 2>/dev/null || \
+    $kc -n rook-ceph patch configmap rook-ceph-operator-config --type merge \
+      -p '{"data":{"ROOK_CEPH_ALLOW_LOOP_DEVICES":"true"}}' 2>/dev/null
+
+  # Verify the operator config actually has loop devices enabled. A silent
+  # failure here means the OSD can never be created (default is false), which
+  # is exactly the class of bug that left the cluster with 0 OSDs before.
+  if [ "$($kc -n rook-ceph get configmap rook-ceph-operator-config \
+        -o jsonpath='{.data.ROOK_CEPH_ALLOW_LOOP_DEVICES}' 2>/dev/null)" != "true" ]; then
+    die "FATAL: ROOK_CEPH_ALLOW_LOOP_DEVICES is not 'true' in rook-ceph-operator-config"
+  fi
+  log "ROOK_CEPH_ALLOW_LOOP_DEVICES=true confirmed"
+
+  log "Waiting for Rook operator..."
+  $kc -n rook-ceph rollout status deploy/rook-ceph-operator --timeout=300s 2>&1 | tail -2
+  log "Rook operator deployed."
+
+  # Create Ceph cluster (single-node, loop device OSD) + block pool + storage class
+  log "Creating Ceph cluster (single-node, loop OSD)..."
+  $kc apply -f "$MANIFESTS/rook-ceph-cluster.yaml" 2>&1 | tail -5
+  log "Ceph cluster manifest applied (operator will reconcile)."
 
   # Apply HAProxy Ingress Controller
   log "Applying HAProxy Ingress Controller..."
@@ -418,6 +560,12 @@ main() {
   start_scheduler
   start_kubelet
   start_kube_proxy
+
+  # Setup loop device for Ceph OSD block storage
+  setup_ceph_osd_loop
+
+  # Start udevd (required by ceph-volume for OSD device detection)
+  start_udevd
 
   # Apply manifests in background so we can `wait` on main processes
   apply_manifests &
