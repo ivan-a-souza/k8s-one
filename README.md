@@ -180,30 +180,31 @@ entrypoint.sh
 
 ## Persistent Volumes
 
-All cluster state is mounted on named Docker volumes, ensuring persistence across restarts:
+All cluster state is stored in **bind mounts** under `./data/`, ensuring persistence across restarts and making the data directly visible/backable on the host:
 
-| Volume | Container Mount | Contents |
+| Host Path | Container Mount | Contents |
 |---|---|---|
-| `etcd-data` | `/var/lib/etcd` | etcd data (cluster state) |
-| `containerd-data` | `/var/lib/containerd` | Images and containers |
-| `kubelet-data` | `/var/lib/kubelet` | Kubelet state and pods |
-| `k8s-pki` | `/etc/kubernetes/pki` | TLS certificates (CAs, certs, keys) |
-| `k8s-configs` | `/etc/kubernetes` | Kubeconfigs (admin, scheduler, etc.) |
+| `./data/etcd/` | `/var/lib/etcd` | etcd data (cluster state) |
+| `./data/containerd/` | `/var/lib/containerd` | Images and containers |
+| `./data/kubelet/` | `/var/lib/kubelet` | Kubelet state and pods |
+| `./data/pki/` | `/etc/kubernetes/pki` | TLS certificates (CAs, certs, keys) |
+| `./data/kubernetes/` | `/etc/kubernetes` | Kubeconfigs (admin, scheduler, etc.) |
+| `./rook-data/` | `/var/lib/rook` | Ceph data: OSD image + keyrings |
 
-Additionally, the container bind-mounts:
+Additionally, the container bind-mounts host system paths:
 
 | Host Path | Container Path | Mode | Reason |
 |---|---|---|---|
 | `/sys` | `/sys` | `rw` | Cilium BPF, cgroups |
 | `/lib/modules` | `/lib/modules` | `ro` | Kernel modules (iptables, etc.) |
-| `./rook-data/` | `/var/lib/rook` | `rw` | Ceph data: OSD image + keyrings (**gitignored!**) |
 
-> ⚠️ `rook-data/` contains the Ceph keyrings and the OSD image (`osd.img`, 30G sparse). It is **gitignored** — never commit it.
+> ⚠️ `./data/` and `./rook-data/` contain cluster secrets (Ceph keyrings, PKI private keys, kubeconfigs). Both are **gitignored** — never commit them.
 
 ### Clean everything
 
 ```bash
-docker compose down -v   # removes container + all named volumes (rook-data/ bind mount is kept)
+docker compose down -v   # removes container + named volumes (bind mounts under ./data/ and ./rook-data/ are kept)
+# To fully wipe cluster data: rm -rf data/* rook-data/*   (irreversible!)
 ```
 
 ---
@@ -481,7 +482,7 @@ Typical timeline for a first run (cold start, no image cache):
 
 ## PKI & Certificates
 
-The entrypoint generates the full PKI on first run. Certificates are persisted in the `k8s-pki` volume and reused across restarts.
+The entrypoint generates the full PKI on first run. Certificates are persisted in the `./data/pki/` bind mount and reused across restarts.
 
 ### CAs (Certificate Authorities)
 

@@ -5,6 +5,9 @@ kubeconfig
 # Dados do Ceph (keyrings + OSD) — NUNCA commitar
 rook-data/
 
+# Bind mounts de estado do cluster (etcd, containerd, kubelet, PKI, kubeconfigs) — NUNCA commitar
+data/
+
 # Docker
 .docker/
 

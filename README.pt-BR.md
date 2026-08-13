@@ -180,30 +180,31 @@ entrypoint.sh
 
 ## Volumes Persistentes
 
-Todo o estado do cluster é montado em Docker volumes nomeados, garantindo persistência entre restarts:
+Todo o estado do cluster é armazenado em **bind mounts** em `./data/`, garantindo persistência entre restarts e deixando os dados diretamente visíveis/backupeáveis no host:
 
-| Volume | Mount no Container | Conteúdo |
+| Host Path | Mount no Container | Conteúdo |
 |---|---|---|
-| `etcd-data` | `/var/lib/etcd` | Dados do etcd (state do cluster) |
-| `containerd-data` | `/var/lib/containerd` | Imagens e containers |
-| `kubelet-data` | `/var/lib/kubelet` | Estado do kubelet e pods |
-| `k8s-pki` | `/etc/kubernetes/pki` | Certificados TLS (CAs, certs, keys) |
-| `k8s-configs` | `/etc/kubernetes` | Kubeconfigs (admin, scheduler, etc.) |
+| `./data/etcd/` | `/var/lib/etcd` | Dados do etcd (state do cluster) |
+| `./data/containerd/` | `/var/lib/containerd` | Imagens e containers |
+| `./data/kubelet/` | `/var/lib/kubelet` | Estado do kubelet e pods |
+| `./data/pki/` | `/etc/kubernetes/pki` | Certificados TLS (CAs, certs, keys) |
+| `./data/kubernetes/` | `/etc/kubernetes` | Kubeconfigs (admin, scheduler, etc.) |
+| `./rook-data/` | `/var/lib/rook` | Dados do Ceph: imagem OSD + keyrings |
 
-Além dos volumes nomeados, o container monta:
+Além dos bind mounts, o container monta paths do sistema host:
 
 | Host Path | Container Path | Modo | Motivo |
 |---|---|---|---|
 | `/sys` | `/sys` | `rw` | Cilium BPF, cgroups |
 | `/lib/modules` | `/lib/modules` | `ro` | Módulos do kernel (iptables, etc.) |
-| `./rook-data/` | `/var/lib/rook` | `rw` | Dados do Ceph: imagem OSD + keyrings (**gitignored!**) |
 
-> ⚠️ `rook-data/` contém os **keyrings do Ceph** e a imagem do OSD (`osd.img`, 30G sparse). Está **gitignored** — nunca commitar.
+> ⚠️ `./data/` e `./rook-data/` contêm segredos do cluster (keyrings do Ceph, chaves privadas da PKI, kubeconfigs). Ambos estão **gitignored** — nunca commitar.
 
 ### Limpar tudo
 
 ```bash
-docker compose down -v   # remove container + volumes nomeados (bind mount rook-data/ é mantido)
+docker compose down -v   # remove container + volumes nomeados (bind mounts em ./data/ e ./rook-data/ são mantidos)
+# Para apagar totalmente os dados do cluster: rm -rf data/* rook-data/*   (irreversível!)
 ```
 
 ---
@@ -481,7 +482,7 @@ Timeline típica da primeira execução (cold start, sem cache de imagens):
 
 ## PKI e Certificados
 
-O entrypoint gera toda a PKI na primeira execução. Certificados são persistidos no volume `k8s-pki` e reutilizados em restarts.
+O entrypoint gera toda a PKI na primeira execução. Certificados são persistidos no bind mount `./data/pki/` e reutilizados em restarts.
 
 ### CAs (Certificate Authorities)
 
@@ -683,9 +684,9 @@ docker compose logs -f | grep etcd
 ### Reset completo
 
 ```bash
-docker compose down -v   # remove container + volumes nomeados (mantém ./rook-data/)
+docker compose down -v   # remove container + volumes nomeados (bind mounts ./data/ e ./rook-data/ são mantidos)
 docker compose up -d     # fresh start
-# Para apagar também os dados do Ceph: rm -rf rook-data/*  (irreversível!)
+# Para apagar também os dados do cluster: rm -rf data/* rook-data/*  (irreversível!)
 ```
 
 ---

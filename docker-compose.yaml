@@ -14,21 +14,14 @@ services:
     volumes:
       - /sys:/sys:rw
       - /lib/modules:/lib/modules:ro
-      - etcd-data:/var/lib/etcd
-      - containerd-data:/var/lib/containerd
-      - kubelet-data:/var/lib/kubelet
-      - k8s-pki:/etc/kubernetes/pki
-      - k8s-configs:/etc/kubernetes
+      - ./data/etcd:/var/lib/etcd
+      - ./data/containerd:/var/lib/containerd
+      - ./data/kubelet:/var/lib/kubelet
+      - ./data/pki:/etc/kubernetes/pki
+      - ./data/kubernetes:/etc/kubernetes
       - ./rook-data:/var/lib/rook
     ports:
       - "6443:6443"
       - "8082:30080"
       - "8443:30443"
     restart: unless-stopped
-
-volumes:
-  etcd-data:
-  containerd-data:
-  kubelet-data:
-  k8s-pki:
-  k8s-configs:
