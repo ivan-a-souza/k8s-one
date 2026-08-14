@@ -448,6 +448,80 @@ SYSTEMCTL
   fi
 }
 
+# ── Cilium CNI health check ──────────────────────────────────────────────
+# Returns 0 only when the CNI is actually serving NEW pods. Three layers:
+#   1. DaemonSet exists with desired == ready
+#   2. Agent answers on its local socket (cilium status)
+#   3. End-to-end: a fresh probe pod gets a PodIP and completes. This is the
+#      layer that catches a dead BPF datapath after a container restart,
+#      where old pods may still report Running but no new pod can get a
+#      network sandbox.
+cilium_healthy() {
+  local kc="kubectl"
+
+  $kc -n kube-system get ds cilium >/dev/null 2>&1 || return 1
+  local desired ready
+  desired=$($kc -n kube-system get ds cilium -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo 0)
+  ready=$($kc -n kube-system get ds cilium -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0)
+  [ "${desired:-0}" -gt 0 ] && [ "$desired" = "$ready" ] || return 1
+
+  cilium status --kubeconfig "$KUBE/admin.conf" --brief >/dev/null 2>&1 || return 1
+
+  # Probe pod: must be created, get a PodIP and reach Succeeded.
+  $kc -n kube-system delete pod cilium-health-probe --force --grace-period=0 >/dev/null 2>&1 || true
+  if ! $kc -n kube-system run cilium-health-probe --image=busybox:1.36 --restart=Never \
+      --command -- /bin/sh -c "sleep 5" >/dev/null 2>&1; then
+    return 1
+  fi
+  local tries=45
+  while [ $tries -gt 0 ]; do
+    local phase ip
+    phase=$($kc -n kube-system get pod cilium-health-probe -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+    ip=$($kc -n kube-system get pod cilium-health-probe -o jsonpath='{.status.podIP}' 2>/dev/null || echo "")
+    if [ "$phase" = "Succeeded" ] && [ -n "$ip" ] && [ "$ip" != "<none>" ]; then
+      $kc -n kube-system delete pod cilium-health-probe --force --grace-period=0 >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 2; tries=$((tries - 1))
+  done
+  $kc -n kube-system delete pod cilium-health-probe --force --grace-period=0 >/dev/null 2>&1 || true
+  return 1
+}
+
+# ── Stale state cleanup ───────────────────────────────────────────────────
+# Removes leftovers that poison a boot: pods the kubelet lost track of
+# (Unknown) and namespaces stuck in Terminating from interrupted installs.
+# Deliberately does NOT touch VolumeAttachments of bound PVCs — those are
+# live data and must be handled individually, never swept blindly.
+cleanup_stale_state() {
+  local kc="kubectl"
+
+  # Pods in Unknown phase — force-recreate so they pick up fresh tokens
+  $kc delete pods -A --field-selector=status.phase=Unknown --force --grace-period=0 2>/dev/null || true
+
+  # cilium-secrets stuck in Terminating (interrupted reinstall) — drop finalizers
+  if $kc get ns cilium-secrets >/dev/null 2>&1; then
+    local phase
+    phase=$($kc get ns cilium-secrets -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+    if [ "$phase" = "Terminating" ]; then
+      log "Removing cilium-secrets stuck in Terminating..."
+      $kc patch ns cilium-secrets --type merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
+      $kc delete ns cilium-secrets --force --grace-period=0 2>/dev/null || true
+    fi
+  fi
+
+  # Orphan VolumeAttachments (PV no longer exists) — safe to drop; the CSI
+  # controller recreates any that are still needed.
+  for va in $($kc get volumeattachment -o name 2>/dev/null | awk -F/ '{print $2}'); do
+    local pv
+    pv=$($kc get volumeattachment "$va" -o jsonpath='{.spec.source.persistentVolumeName}' 2>/dev/null || echo "")
+    if [ -n "$pv" ] && ! $kc get pv "$pv" >/dev/null 2>&1; then
+      log "Deleting orphan VolumeAttachment $va (PV $pv gone)"
+      $kc delete volumeattachment "$va" 2>/dev/null || true
+    fi
+  done
+}
+
 # ── Post-init: apply manifests ────────────────────────────────────────────
 apply_manifests() {
   export KUBECONFIG="$KUBE/admin.conf"
@@ -464,22 +538,51 @@ apply_manifests() {
   # Remove control-plane taint so workloads can be scheduled
   $kc taint nodes "$NODE_NAME" node-role.kubernetes.io/control-plane:NoSchedule- 2>/dev/null || true
 
-  # Install Cilium. On every boot we fully uninstall + reinstall it: the
-  # in-memory BPF datapath does not survive a container restart, leaving the
-  # pod network broken (ClusterIP unreachable) even though pods report Running.
-  log "Installing Cilium CNI (clean reinstall)..."
-  cilium uninstall --kubeconfig "$KUBE/admin.conf" 2>/dev/null || true
-  rm -rf /sys/fs/bpf/cilium/devices/* 2>/dev/null || true
-  if ! cilium install \
-    --kubeconfig "$KUBE/admin.conf" \
-    --version v1.19.5 \
-    --set cluster.name="$NODE_NAME" \
-    --set cluster.id=1 \
-    --set kubeProxyReplacement=false \
-    --wait 2>&1; then
-    if ! $kc -n kube-system get ds cilium >/dev/null 2>&1; then
-      log "FATAL: Cilium is not available and install failed"
-      return 1
+  # Clean up stale state from previous boots BEFORE deciding about Cilium.
+  cleanup_stale_state
+
+  # Cilium CNI. Reinstall ONLY when unhealthy — a blind reinstall on every
+  # boot recreates Cilium ServiceAccounts and invalidates the tokens mounted
+  # in running agent pods (Unauthorized -> CrashLoopBackOff -> every pod in
+  # the cluster flips to Unknown because the CNI cannot create sandboxes).
+  if cilium_healthy; then
+    log "Cilium CNI healthy, skipping reinstall."
+  else
+    log "Cilium CNI unhealthy, reinstalling..."
+    cilium uninstall --kubeconfig "$KUBE/admin.conf" 2>/dev/null || true
+    rm -rf /sys/fs/bpf/cilium/devices/* 2>/dev/null || true
+
+    # Uninstall is async: the cilium-secrets namespace can linger in
+    # Terminating and make the install fail with "unable to create content in
+    # namespace ... because it is being terminated". Wait for it to be fully
+    # gone, force-dropping finalizers if the namespace controller is stuck.
+    local ns_tries=30
+    while [ $ns_tries -gt 0 ]; do
+      if ! $kc get ns cilium-secrets >/dev/null 2>&1; then
+        log "cilium-secrets namespace fully removed."
+        break
+      fi
+      local ns_phase
+      ns_phase=$($kc get ns cilium-secrets -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+      if [ "$ns_phase" = "Terminating" ]; then
+        log "Forcing removal of cilium-secrets (Terminating)..."
+        $kc patch ns cilium-secrets --type merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
+        $kc delete ns cilium-secrets --force --grace-period=0 2>/dev/null || true
+      fi
+      sleep 2; ns_tries=$((ns_tries - 1))
+    done
+
+    if ! cilium install \
+      --kubeconfig "$KUBE/admin.conf" \
+      --version v1.19.5 \
+      --set cluster.name="$NODE_NAME" \
+      --set cluster.id=1 \
+      --set kubeProxyReplacement=false \
+      --wait 2>&1; then
+      if ! $kc -n kube-system get ds cilium >/dev/null 2>&1; then
+        log "FATAL: Cilium is not available and install failed"
+        return 1
+      fi
     fi
   fi
   log "Cilium ready."
