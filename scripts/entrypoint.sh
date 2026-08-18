@@ -373,25 +373,79 @@ setup_ceph_osd_loop() {
     truncate -s "$size" "$img"
   fi
 
-  # Attach loop device if not already attached.
-  # NOTE: rook-ceph-cluster.yaml declares the OSD device EXCLUSIVELY as
-  # /dev/loop0, so attach to that exact device. Using `losetup -f` (first free
-  # loop) could pick loop1+ and the OSD would silently never find its disk.
-  if ! losetup -j "$img" >/dev/null 2>&1; then
+  # The rook manifest declares the OSD device EXCLUSIVELY as /dev/loop0
+  # (devicePathFilter + devices[].name=loop0). If osd.img ends up attached to
+  # any OTHER loop device, the OSD silently never finds its disk and stays in
+  # Init:CrashLoopBackOff ("no disk found with OSD ID 0"). Enforce loop0.
+  # NOTE: compare by INODE (losetup -j), never by backing-file string — the
+  # kernel may report the path differently than $img (e.g. "/osd.img").
+
+  # 1. Which loop device is backing osd.img right now?
+  local cur=""
+  cur=$(losetup -j "$img" 2>/dev/null | cut -d: -f1 | head -1) || true
+
+  # 2. If osd.img is on a different loop device, detach it first.
+  if [ -n "$cur" ] && [ "$cur" != "/dev/loop0" ]; then
+    log "osd.img attached to $cur — moving to /dev/loop0..."
+    losetup -d "$cur" 2>/dev/null || true
+    cur=""
+  fi
+
+  # 3. If /dev/loop0 is busy with a DIFFERENT file, detach it.
+  if losetup -a 2>/dev/null | grep -q '^/dev/loop0:'; then
+    if [ "$cur" != "/dev/loop0" ]; then
+      log "Detaching /dev/loop0 (occupied by another file)..."
+      losetup -d /dev/loop0 2>/dev/null || true
+    fi
+  fi
+
+  # 4. Attach if /dev/loop0 is not backing osd.img (inode check).
+  if ! losetup -j "$img" 2>/dev/null | grep -q '^/dev/loop0:'; then
     log "Attaching /dev/loop0 to $img..."
     if ! losetup /dev/loop0 "$img" 2>&1; then
       die "FATAL: cannot attach /dev/loop0 to $img (device busy with another file?)"
     fi
   fi
 
-  # Verify the attach REALLY happened: losetup -j exits 0 ONLY when the image
-  # is actually associated with a loop device. Never pipe to head/&& here
-  # (head always exits 0, which silently masked a failed attach before).
-  if losetup -j "$img" >/dev/null 2>&1; then
-    log "OSD loop device ready"
+  # 5. Verify the attach REALLY happened and points at loop0.
+  if losetup -j "$img" 2>/dev/null | grep -q '^/dev/loop0:'; then
+    log "OSD loop device ready (/dev/loop0 -> $img)"
   else
-    die "FATAL: OSD loop device NOT attached ($img has no loop backing)"
+    die "FATAL: OSD loop device NOT attached to /dev/loop0"
   fi
+}
+
+# ── Wait for Ceph OSD ────────────────────────────────────────────────────
+# After the CephCluster manifest is applied, the Rook operator creates the
+# OSD pod. Wait for it to be Ready; if it crash-loops (init "activate" can't
+# find the disk), re-attach the loop backing and force-restart the pod.
+wait_for_ceph_osd() {
+  local kc="kubectl"
+  local tries=150   # ~5 min
+  log "Waiting for Ceph OSD to become Ready..."
+  while [ $tries -gt 0 ]; do
+    local osd_pod osd_ready osd_restarts
+    osd_pod=$($kc -n rook-ceph get pods -l app=rook-ceph-osd \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+    if [ -n "$osd_pod" ]; then
+      osd_ready=$($kc -n rook-ceph get pod "$osd_pod" \
+        -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo "")
+      if [ "$osd_ready" = "true" ]; then
+        log "Ceph OSD is Ready ($osd_pod)."
+        return 0
+      fi
+      osd_restarts=$($kc -n rook-ceph get pod "$osd_pod" \
+        -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)
+      if [ "${osd_restarts:-0}" -ge 4 ]; then
+        log "OSD $osd_pod crash-looping ($osd_restarts restarts) — re-attaching loop0 and restarting pod..."
+        setup_ceph_osd_loop
+        $kc -n rook-ceph delete pod "$osd_pod" --force --grace-period=0 2>/dev/null || true
+      fi
+    fi
+    sleep 2; tries=$((tries - 1))
+  done
+  log "WARNING: Ceph OSD did not become Ready in time (boot continues)."
+  return 1
 }
 
 # ── Start udevd (required by ceph-volume for device identification) ───────
@@ -635,6 +689,11 @@ apply_manifests() {
   log "Creating Ceph cluster (single-node, loop OSD)..."
   $kc apply -f "$MANIFESTS/rook-ceph-cluster.yaml" 2>&1 | tail -5
   log "Ceph cluster manifest applied (operator will reconcile)."
+
+  # Idempotent OSD recovery: wait for the OSD to be Ready; if it crash-loops
+  # (loop backing lost after a container restart), re-attach /dev/loop0 and
+  # force-restart the pod automatically.
+  wait_for_ceph_osd
 
   # Apply HAProxy Ingress Controller
   log "Applying HAProxy Ingress Controller..."
