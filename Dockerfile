@@ -117,10 +117,11 @@ COPY --from=builder /build/bin/cilium                  /usr/local/bin/
 COPY --from=builder /build/cni/ /opt/cni/bin/
 
 # ── Manifests ─────────────────────────────────────────────────────────────
+# Somente os manifests do Rook (baixados no build) são assados na imagem.
+# Os manifests custom (coredns, haproxy, rook-ceph-cluster, apps) são
+# montados via volume no docker-compose (./manifests:/opt/manifests/...) —
+# NÃO devem ser COPYados aqui (são gitignored e mudam sem rebuild).
 COPY --from=builder /build/manifests/ /opt/manifests/
-COPY manifests/coredns.yaml /opt/manifests/coredns.yaml
-COPY manifests/haproxy-ingress.yaml /opt/manifests/haproxy-ingress.yaml
-COPY manifests/rook-ceph-cluster.yaml /opt/manifests/rook-ceph-cluster.yaml
 
 # ── Configs & scripts ─────────────────────────────────────────────────────
 COPY configs/containerd-config.toml /etc/containerd/config.toml

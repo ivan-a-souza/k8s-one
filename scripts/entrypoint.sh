@@ -646,7 +646,7 @@ apply_manifests() {
 
   # Apply CoreDNS
   log "Applying CoreDNS..."
-  $kc apply -f "$MANIFESTS/coredns.yaml" 2>&1 | tail -3
+  $kc apply -f "$MANIFESTS/built-in/coredns.yaml" 2>&1 | tail -3
   log "CoreDNS applied."
 
   # Deploy Rook-Ceph operator
@@ -687,7 +687,7 @@ apply_manifests() {
 
   # Create Ceph cluster (single-node, loop device OSD) + block pool + storage class
   log "Creating Ceph cluster (single-node, loop OSD)..."
-  $kc apply -f "$MANIFESTS/rook-ceph-cluster.yaml" 2>&1 | tail -5
+  $kc apply -f "$MANIFESTS/built-in/rook-ceph-cluster.yaml" 2>&1 | tail -5
   log "Ceph cluster manifest applied (operator will reconcile)."
 
   # Idempotent OSD recovery: wait for the OSD to be Ready; if it crash-loops
@@ -697,8 +697,13 @@ apply_manifests() {
 
   # Apply HAProxy Ingress Controller
   log "Applying HAProxy Ingress Controller..."
-  $kc apply -f "$MANIFESTS/haproxy-ingress.yaml" 2>&1 | tail -5
+  $kc apply -f "$MANIFESTS/built-in/haproxy-ingress.yaml" 2>&1 | tail -5
   log "HAProxy Ingress Controller applied."
+
+  # Apply metrics-server (metrics.k8s.io API — kubectl top / HPA)
+  log "Applying metrics-server..."
+  $kc apply -f "$MANIFESTS/built-in/metrics-server.yaml" 2>&1 | tail -5
+  log "metrics-server applied."
 
   log "============================================="
   log "  K8s-One cluster is READY!"

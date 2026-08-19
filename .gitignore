@@ -5,8 +5,11 @@ kubeconfig
 # Bind mounts de estado do cluster (etcd, containerd, kubelet, PKI, kubeconfigs, Ceph) — NUNCA commitar
 data/
 
-# Manifests Kubernetes — locais, aplicados via docker cp (não versionar)
+# Manifests Kubernetes — locais, aplicados via mount (não versionar)
 manifests/
+
+# Segredos dos apps (envs do kustomize) — nunca versionar
+manifests/apps/secrets/
 
 # Docker
 .docker/

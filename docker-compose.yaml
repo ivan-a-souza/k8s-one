@@ -21,8 +21,11 @@ services:
       - ./data/kubernetes:/etc/kubernetes
       - ./data/rook:/var/lib/rook
       - ./data/tiles:/var/lib/tiles
+      - ./manifests/built-in:/opt/manifests/built-in:ro
+      - ./manifests/apps:/opt/manifests/apps:ro
     ports:
-      - "6443:6443"
-      - "8082:30080"
-      - "8443:30443"
+      - "127.0.0.1:6443:6443"
+      - "100.67.186.94:6443:6443"
+      - "100.67.186.94:8082:30080"
+      - "100.67.186.94:8443:30443"
     restart: unless-stopped

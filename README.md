@@ -23,6 +23,7 @@ Packaged in a **minimal Debian-based image** via multi-stage build (no package m
 │  CNI: Cilium  │  DNS: CoreDNS                    │
 │  Storage: Rook-Ceph (RBD + CephFS)               │
 │  Ingress: HAProxy (Host ports 8082/8443)         │
+│  Metrics: metrics-server (metrics.k8s.io API)    │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -113,6 +114,7 @@ All binaries are downloaded from official sources during build. No pre-packaged 
 | **Ceph** | v20.2.2 | quay.io/ceph/ceph | Storage daemons (mon, mgr, osd, mds) |
 | **Ceph CSI** | v3.17.0 | quay.io/cephcsi | CSI drivers (RBD block + CephFS) |
 | **HAProxy Ingress** | pinned by digest | haproxytech/kubernetes-ingress | Ingress Controller (HAProxy 3.2.21) |
+| **metrics-server** | v0.9.0 (pinned by digest) | registry.k8s.io | metrics.k8s.io API — kubectl top / HPA |
 
 ---
 
@@ -238,7 +240,7 @@ docker compose build --build-arg TARGETARCH=arm64
 | `ROOK_VERSION` | `v1.20.3` | Rook operator version (manifests downloaded from this tag) |
 | `TARGETARCH` | `amd64` | Target architecture |
 
-> The **Ceph image version** is set in `manifests/rook-ceph-cluster.yaml` (`quay.io/ceph/ceph:v20.2.2` — pinned to the version officially tested with Rook 1.20.3; do **not** use the floating `:v20` tag).
+> The **Ceph image version** is set in `manifests/built-in/rook-ceph-cluster.yaml` (`quay.io/ceph/ceph:v20.2.2` — pinned to the version officially tested with Rook 1.20.3; do **not** use the floating `:v20` tag).
 
 ### Environment Variables (runtime)
 
@@ -443,15 +445,27 @@ k8s-one/
 │
 ├── scripts/
 │   ├── entrypoint.sh                   # Orchestration: PKI, configs, processes, manifests
+│   ├── deploy-apps.sh                  # Applies manifests/apps via kustomize (no docker cp)
 │   └── rbd-device-watch.sh             # Creates /dev/rbdN nodes (krbd with noudev)
 │
 ├── configs/
 │   └── containerd-config.toml          # containerd: runc + cgroupfs + overlayfs
 │
-└── manifests/
-    ├── coredns.yaml                    # CoreDNS (ServiceAccount, RBAC, Deployment, Service)
-    ├── haproxy-ingress.yaml            # HAProxy Ingress Controller (image pinned by digest)
-    └── rook-ceph-cluster.yaml          # CephCluster CR (single-node, loop OSD) + pools + SCs
+└── manifests/                          # GITIGNORED — mounted ro into the container
+    ├── built-in/                       # Core: applied by entrypoint.sh on every boot
+    │   ├── coredns.yaml                # CoreDNS (ServiceAccount, RBAC, Deployment, Service)
+    │   ├── haproxy-ingress.yaml        # HAProxy Ingress Controller (image pinned by digest)
+    │   └── rook-ceph-cluster.yaml      # CephCluster CR (single-node, loop OSD) + pools + SCs
+    ├── apps/                           # On-demand: applied with scripts/deploy-apps.sh
+    │   ├── kustomization.yaml          # secretGenerator lê apps/secrets/*.env
+    │   ├── headlamp.yaml               # Headlamp dashboard (read-only RBAC)
+    │   ├── ceph-dashboard.yaml         # Ceph dashboard (basic auth via kustomize secret)
+    │   ├── tileserver.yaml             # TileServer GL
+    │   ├── postgres.yaml               # PostgreSQL 16 PoC (ceph-block PVC)
+    │   └── secrets/                    # Envs for kustomize — NEVER commit (see .gitignore)
+    │       ├── headlamp.env
+    │       ├── ceph.env
+    │       └── postgres.env
     # rook-crds/common/csi-operator/operator.yaml  (downloaded at build from Rook v1.20.3)
 ```
 
@@ -586,7 +600,7 @@ Replication is `size: 1` (single node) — data is **not redundant**; the OSD li
 
 ### Change upstream DNS
 
-Edit `manifests/coredns.yaml`, `forward` section:
+Edit `manifests/built-in/coredns.yaml`, `forward` section:
 
 ```
 forward . 8.8.8.8 1.1.1.1 {
@@ -646,7 +660,7 @@ kubectl logs -n kube-system -l k8s-app=kube-dns
 
 Common causes:
 - Loop detection → already fixed with forward to 8.8.8.8
-- Corefile syntax error → check `manifests/coredns.yaml`
+- Corefile syntax error → check `manifests/built-in/coredns.yaml`
 
 ### OSD not created after reboot (0 OSDs)
 
