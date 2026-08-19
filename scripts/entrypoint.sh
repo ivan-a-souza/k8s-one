@@ -542,6 +542,34 @@ cilium_healthy() {
   return 1
 }
 
+# ── Stale APIService cleanup ──────────────────────────────────────────────
+# A broken aggregated APIService makes the namespace controller fail
+# discovery, which wedges ANY namespace stuck in Terminating (cilium-secrets
+# -> cilium reinstall hangs). An APIService is stale when its backing Service
+# has no Ready endpoints OR it reports itself unavailable (FailedDiscoveryCheck)
+# — the latter catches pods that are dead but still registered (stale IP after
+# a container/host restart). Safe: the owning Deployment re-registers, or the
+# manifest is re-applied later in the boot.
+# NOTE: only called EARLY (before the cilium reinstall), NOT in the final
+# cleanup pass — otherwise it deletes a freshly-applied APIService that is
+# still warming up (metrics-server applied at the end of apply_manifests).
+cleanup_stale_apiservices() {
+  local kc="kubectl"
+
+  for api in $($kc get apiservice -o name 2>/dev/null | awk -F/ '{print $2}'); do
+    local svc ns avail endpoints
+    svc=$($kc get apiservice "$api" -o jsonpath='{.spec.service.name}' 2>/dev/null || echo "")
+    ns=$($kc get apiservice "$api" -o jsonpath='{.spec.service.namespace}' 2>/dev/null || echo "")
+    [ -z "$svc" ] || [ -z "$ns" ] && continue
+    avail=$($kc get apiservice "$api" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "")
+    endpoints=$($kc get endpoints -n "$ns" "$svc" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || echo "")
+    if [ "$avail" != "True" ] || [ -z "$endpoints" ]; then
+      log "Deleting stale APIService $api (available=$avail endpoints='$endpoints')"
+      $kc delete apiservice "$api" 2>/dev/null || true
+    fi
+  done
+}
+
 # ── Stale state cleanup ───────────────────────────────────────────────────
 # Removes leftovers that poison a boot: pods the kubelet lost track of
 # (Unknown) and namespaces stuck in Terminating from interrupted installs.
@@ -560,7 +588,9 @@ cleanup_stale_state() {
     if [ "$phase" = "Terminating" ]; then
       log "Removing cilium-secrets stuck in Terminating..."
       $kc patch ns cilium-secrets --type merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-      $kc delete ns cilium-secrets --force --grace-period=0 2>/dev/null || true
+      # --wait=false: kubectl would otherwise block until the namespace is gone,
+      # and a wedged namespace hangs the boot indefinitely.
+      $kc delete ns cilium-secrets --force --grace-period=0 --wait=false 2>/dev/null || true
     fi
   fi
 
@@ -593,6 +623,10 @@ apply_manifests() {
   $kc taint nodes "$NODE_NAME" node-role.kubernetes.io/control-plane:NoSchedule- 2>/dev/null || true
 
   # Clean up stale state from previous boots BEFORE deciding about Cilium.
+  # Order matters: stale aggregated APIServices (e.g. metrics.k8s.io) break
+  # namespace finalization, so remove them FIRST or the cilium-secrets removal
+  # below can wedge (DiscoveryFailed -> Terminating namespace stuck forever).
+  cleanup_stale_apiservices
   cleanup_stale_state
 
   # Cilium CNI. Reinstall ONLY when unhealthy — a blind reinstall on every
@@ -621,10 +655,17 @@ apply_manifests() {
       if [ "$ns_phase" = "Terminating" ]; then
         log "Forcing removal of cilium-secrets (Terminating)..."
         $kc patch ns cilium-secrets --type merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-        $kc delete ns cilium-secrets --force --grace-period=0 2>/dev/null || true
+        # --wait=false: never block on a possibly-wedged namespace.
+        $kc delete ns cilium-secrets --force --grace-period=0 --wait=false 2>/dev/null || true
       fi
       sleep 2; ns_tries=$((ns_tries - 1))
     done
+
+    # Force-delete pods left Terminating by a previous (un)install — stale
+    # cilium pods hold hostPorts (e.g. 4244) and would keep the new DaemonSet
+    # pod Pending forever, hanging `cilium install --wait`. Only Terminating
+    # pods are touched (already going away); controllers recreate them.
+    $kc -n kube-system delete pods --field-selector=status.phase=Terminating --force --grace-period=0 2>/dev/null || true
 
     if ! cilium install \
       --kubeconfig "$KUBE/admin.conf" \
@@ -704,6 +745,18 @@ apply_manifests() {
   log "Applying metrics-server..."
   $kc apply -f "$MANIFESTS/built-in/metrics-server.yaml" 2>&1 | tail -5
   log "metrics-server applied."
+
+  # Final stale-state pass: pods only get marked Unknown once the kubelet
+  # finishes reconciling (async), so the early cleanup can miss them — a
+  # leftover Unknown pod blocks its Deployment/StatefulSet from scaling a
+  # replacement and the app stays down. Retry a few times with a gap to catch
+  # stragglers. Idempotent: only touches Unknown pods, Terminating
+  # cilium-secrets and VolumeAttachments whose PV no longer exists.
+  for _ in 1 2 3; do
+    cleanup_stale_state
+    sleep 10
+  done
+  log "Stale-state cleanup finished."
 
   log "============================================="
   log "  K8s-One cluster is READY!"
