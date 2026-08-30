@@ -7,6 +7,7 @@ set -euo pipefail
 # ===========================================================================
 
 NODE_NAME="${NODE_NAME:-k8s-one}"
+ARGOCD_VERSION="${ARGOCD_VERSION:-v3.5.1}"
 CLUSTER_CIDR="192.168.0.0/16"
 SERVICE_CIDR="10.96.0.0/12"
 CLUSTER_DNS="10.96.0.10"
@@ -17,16 +18,139 @@ KUBE="/etc/kubernetes"
 MANIFESTS="/opt/manifests"
 
 declare -a PIDS=()
+CONTAINERD_PID=""
+ETCD_PID=""
+APISERVER_PID=""
+CONTROLLER_MANAGER_PID=""
+SCHEDULER_PID=""
+KUBELET_PID=""
+KUBE_PROXY_PID=""
+APPLY_PID=""
+SHUTTING_DOWN=0
 
 log()  { echo "[k8s-one] $(date -u '+%H:%M:%S') $*"; }
 die()  { log "FATAL: $*"; exit 1; }
 
-# ── Cleanup ────────────────────────────────────────────────────────────────
+if [[ ! "$ARGOCD_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  die "ARGOCD_VERSION must use the vX.Y.Z format (received: $ARGOCD_VERSION)"
+fi
+
+# ── Ordered shutdown ──────────────────────────────────────────────────────
+stop_pid() {
+  local label=$1 pid=${2:-} tries=${3:-20}
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 0
+
+  log "Stopping $label..."
+  kill -TERM "$pid" 2>/dev/null || true
+  while [ "$tries" -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    tries=$((tries - 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    log "WARNING: $label did not stop gracefully; sending SIGKILL"
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+}
+
+storage_mounts_active() {
+  # RBD-backed filesystems and CephFS mounts must disappear before the Ceph
+  # pods are stopped. Otherwise krbd/ceph can remain blocked in the kernel and
+  # prevent the outer Docker container from being recreated.
+  findmnt -rn -o SOURCE,FSTYPE,TARGET 2>/dev/null | awk '
+    $1 ~ /^\/dev\/rbd/ || $2 == "ceph" || $2 == "fuse.ceph" { found=1 }
+    END { exit !found }
+  '
+}
+
+stop_storage_consumers() {
+  if ! kubectl --kubeconfig="$KUBE/admin.conf" get --raw=/readyz >/dev/null 2>&1; then
+    log "API unavailable; skipping Kubernetes storage drain."
+    return 0
+  fi
+
+  local kc="kubectl --kubeconfig=$KUBE/admin.conf"
+  log "Cordoning $NODE_NAME and stopping pods that use PVCs..."
+  $kc cordon "$NODE_NAME" >/dev/null 2>&1 || true
+
+  local -A consumers=()
+  local namespace pod claim key
+  while IFS=$'\t' read -r namespace pod claim; do
+    [ -n "${namespace:-}" ] && [ -n "${pod:-}" ] && [ -n "${claim:-}" ] || continue
+    consumers["$namespace/$pod"]+="$claim,"
+  done < <($kc get pods -A -o go-template='{{range .items}}{{ $namespace := .metadata.namespace }}{{ $pod := .metadata.name }}{{range .spec.volumes}}{{if .persistentVolumeClaim}}{{printf "%s\t%s\t%s\n" $namespace $pod .persistentVolumeClaim.claimName}}{{end}}{{end}}{{end}}' 2>/dev/null || true)
+
+  for key in "${!consumers[@]}"; do
+    namespace=${key%%/*}
+    pod=${key#*/}
+    log "Stopping storage consumer $key (PVC: ${consumers[$key]%,})"
+    $kc -n "$namespace" delete pod "$pod" --grace-period=30 --wait=false >/dev/null 2>&1 || true
+  done
+
+  local tries=120
+  while [ "$tries" -gt 0 ]; do
+    if ! storage_mounts_active && ! compgen -G '/sys/bus/rbd/devices/*' >/dev/null; then
+      log "RBD and CephFS volumes are cleanly detached."
+      return 0
+    fi
+    sleep 1
+    tries=$((tries - 1))
+  done
+  log "WARNING: storage mounts did not detach within 120s; continuing shutdown."
+}
+
+stop_containerd_tasks() {
+  local -a tasks=()
+  mapfile -t tasks < <(ctr -n k8s.io tasks list -q 2>/dev/null || true)
+  [ "${#tasks[@]}" -gt 0 ] || return 0
+
+  log "Stopping ${#tasks[@]} remaining Kubernetes container task(s)..."
+  local task
+  for task in "${tasks[@]}"; do
+    ctr -n k8s.io tasks kill --signal SIGTERM "$task" >/dev/null 2>&1 || true
+  done
+
+  local tries=30
+  while [ "$tries" -gt 0 ]; do
+    mapfile -t tasks < <(ctr -n k8s.io tasks list -q 2>/dev/null || true)
+    [ "${#tasks[@]}" -eq 0 ] && return 0
+    sleep 1
+    tries=$((tries - 1))
+  done
+
+  log "WARNING: forcing ${#tasks[@]} container task(s) to stop."
+  for task in "${tasks[@]}"; do
+    ctr -n k8s.io tasks kill --signal SIGKILL "$task" >/dev/null 2>&1 || true
+  done
+}
+
 cleanup() {
-  log "Shutting down all components..."
-  for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null || true; done
-  wait 2>/dev/null || true
-  log "Bye."
+  [ "$SHUTTING_DOWN" -eq 0 ] || return 0
+  SHUTTING_DOWN=1
+  trap - SIGTERM SIGINT
+  log "Starting ordered cluster shutdown..."
+
+  # Stop reconciliation first so deleted storage consumers are not recreated.
+  stop_pid "manifest reconciler" "$APPLY_PID" 5
+  if kubectl --kubeconfig="$KUBE/admin.conf" get --raw=/readyz >/dev/null 2>&1; then
+    kubectl --kubeconfig="$KUBE/admin.conf" cordon "$NODE_NAME" >/dev/null 2>&1 || true
+  fi
+  stop_pid "kube-scheduler" "$SCHEDULER_PID" 10
+  stop_pid "kube-controller-manager" "$CONTROLLER_MANAGER_PID" 10
+
+  # Keep kubelet, the API and Ceph alive until every application volume has
+  # been unpublished by CSI.
+  stop_storage_consumers
+  stop_pid "kubelet" "$KUBELET_PID" 20
+  stop_pid "kube-proxy" "$KUBE_PROXY_PID" 10
+  stop_containerd_tasks
+
+  # The control plane and runtime can now stop in reverse dependency order.
+  stop_pid "kube-apiserver" "$APISERVER_PID" 20
+  stop_pid "etcd" "$ETCD_PID" 20
+  stop_pid "containerd" "$CONTAINERD_PID" 20
+  losetup -d /dev/loop0 2>/dev/null || true
+
+  log "Ordered cluster shutdown complete."
   exit 0
 }
 trap cleanup SIGTERM SIGINT
@@ -39,6 +163,34 @@ setup_mounts() {
   if ! mountpoint -q /sys/fs/bpf 2>/dev/null; then
     mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
   fi
+
+  # Docker hands the container a plain tmpfs /dev, which does NOT auto-create
+  # device nodes for kernel block devices (e.g. /dev/rbdN from the krbd RBD
+  # mounter). `rbd map --options noudev` maps the device but its post-check
+  # fails because /dev/rbdN only appears after the 1s rbd-device-watch poll —
+  # a race that left RBD volumes stuck in ContainerCreating. Mounting devtmpfs
+  # makes the kernel create /dev/rbdN instantly (and also exposes loop devices
+  # for the Ceph OSD).
+  if ! grep -q ' /dev devtmpfs ' /proc/self/mounts 2>/dev/null; then
+    if mount -t devtmpfs devtmpfs /dev 2>/dev/null; then
+      log "devtmpfs mounted on /dev."
+      # Restore convenience symlinks that devtmpfs does not provide.
+      ln -sf /proc/self/fd /dev/fd 2>/dev/null || true
+      ln -sf fd/0 /dev/stdin 2>/dev/null || true
+      ln -sf fd/1 /dev/stdout 2>/dev/null || true
+      ln -sf fd/2 /dev/stderr 2>/dev/null || true
+    else
+      log "WARNING: could not mount devtmpfs on /dev (RBD mounts may fail)"
+    fi
+  fi
+
+  # Loop devices are registered lazily by the kernel; ensure the nodes exist
+  # so `losetup /dev/loop0` in setup_ceph_osd_loop never fails.
+  for i in 0 1 2 3 4 5 6 7; do
+    [ -e "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i" 2>/dev/null || true
+  done
+  [ -e /dev/loop-control ] || mknod /dev/loop-control c 10 237 2>/dev/null || true
+
   log "Mount propagation configured."
 }
 
@@ -219,9 +371,29 @@ wait_for_node_ready() {
 start_containerd() {
   log "Starting containerd..."
   containerd --config /etc/containerd/config.toml &
-  PIDS+=($!)
+  CONTAINERD_PID=$!
+  PIDS+=("$CONTAINERD_PID")
   wait_for_socket /run/containerd/containerd.sock
   log "containerd ready."
+}
+
+cleanup_orphaned_containerd_records() {
+  local -a tasks=() containers=()
+  mapfile -t tasks < <(ctr -n k8s.io tasks list -q 2>/dev/null || true)
+  mapfile -t containers < <(ctr -n k8s.io containers list -q 2>/dev/null || true)
+
+  # After the outer container or host stops, nested tasks are gone but their
+  # CRI metadata remains on the persistent containerd volume. Kubelet cannot
+  # recreate those sandboxes until only these stale container records are
+  # removed. Images, snapshots and Kubernetes/PVC data are deliberately kept.
+  if [ "${#tasks[@]}" -eq 0 ] && [ "${#containers[@]}" -gt 0 ]; then
+    log "Removing ${#containers[@]} orphaned containerd record(s)..."
+    local container
+    for container in "${containers[@]}"; do
+      ctr -n k8s.io containers delete "$container" >/dev/null 2>&1 || true
+    done
+    log "Orphaned records removed; images and snapshots preserved."
+  fi
 }
 
 start_etcd() {
@@ -242,7 +414,8 @@ start_etcd() {
     --peer-key-file="$PKI/etcd/server.key" \
     --peer-client-cert-auth=true \
     --peer-trusted-ca-file="$PKI/etcd/ca.crt" &
-  PIDS+=($!)
+  ETCD_PID=$!
+  PIDS+=("$ETCD_PID")
   # Wait for etcd with proper client certs
   local tries=60
   while [ $tries -gt 0 ]; do
@@ -255,6 +428,7 @@ start_etcd() {
     fi
     sleep 1; tries=$((tries - 1))
   done
+  [ "$tries" -gt 0 ] || die "Timeout waiting for etcd"
   log "etcd ready."
 }
 
@@ -287,7 +461,8 @@ start_apiserver() {
     --service-cluster-ip-range="$SERVICE_CIDR" \
     --tls-cert-file="$PKI/apiserver.crt" \
     --tls-private-key-file="$PKI/apiserver.key" &
-  PIDS+=($!)
+  APISERVER_PID=$!
+  PIDS+=("$APISERVER_PID")
   wait_for_url "https://127.0.0.1:$API_PORT/healthz" 120
   log "kube-apiserver ready."
 }
@@ -311,7 +486,8 @@ start_controller_manager() {
     --service-account-private-key-file="$PKI/sa.key" \
     --service-cluster-ip-range="$SERVICE_CIDR" \
     --use-service-account-credentials=true &
-  PIDS+=($!)
+  CONTROLLER_MANAGER_PID=$!
+  PIDS+=("$CONTROLLER_MANAGER_PID")
   log "kube-controller-manager started."
 }
 
@@ -323,7 +499,8 @@ start_scheduler() {
     --bind-address=127.0.0.1 \
     --kubeconfig="$KUBE/scheduler.conf" \
     --leader-elect=false &
-  PIDS+=($!)
+  SCHEDULER_PID=$!
+  PIDS+=("$SCHEDULER_PID")
   log "kube-scheduler started."
 }
 
@@ -338,7 +515,8 @@ start_kubelet() {
     --node-ip="$NODE_IP" \
     --register-node=true \
     --v=2 &
-  PIDS+=($!)
+  KUBELET_PID=$!
+  PIDS+=("$KUBELET_PID")
   log "kubelet started."
 }
 
@@ -349,7 +527,8 @@ start_kube_proxy() {
     --cluster-cidr="$CLUSTER_CIDR" \
     --conntrack-max-per-core=0 \
     --proxy-mode=iptables &
-  PIDS+=($!)
+  KUBE_PROXY_PID=$!
+  PIDS+=("$KUBE_PROXY_PID")
   log "kube-proxy started."
 }
 
@@ -621,6 +800,9 @@ apply_manifests() {
 
   # Remove control-plane taint so workloads can be scheduled
   $kc taint nodes "$NODE_NAME" node-role.kubernetes.io/control-plane:NoSchedule- 2>/dev/null || true
+  # Ordered shutdown cordons the node before draining PVC consumers. Restore
+  # scheduling only after kubelet has registered again on this boot.
+  $kc uncordon "$NODE_NAME" >/dev/null 2>&1 || true
 
   # Clean up stale state from previous boots BEFORE deciding about Cilium.
   # Order matters: stale aggregated APIServices (e.g. metrics.k8s.io) break
@@ -661,11 +843,23 @@ apply_manifests() {
       sleep 2; ns_tries=$((ns_tries - 1))
     done
 
-    # Force-delete pods left Terminating by a previous (un)install — stale
-    # cilium pods hold hostPorts (e.g. 4244) and would keep the new DaemonSet
-    # pod Pending forever, hanging `cilium install --wait`. Only Terminating
-    # pods are touched (already going away); controllers recreate them.
-    $kc -n kube-system delete pods --field-selector=status.phase=Terminating --force --grace-period=0 2>/dev/null || true
+    # Force-delete Cilium pods left Terminating by a previous (un)install.
+    # "Terminating" is not a pod phase, so a status.phase field selector never
+    # matches it; deletionTimestamp is the authoritative signal. Stale Cilium
+    # pods hold hostPorts (e.g. 4244), leaving the replacement pods Pending.
+    local terminating_pod
+    while IFS= read -r terminating_pod; do
+      [ -n "$terminating_pod" ] || continue
+      case "$terminating_pod" in
+        cilium-*)
+          log "Force-deleting stale pod kube-system/$terminating_pod"
+          $kc -n kube-system delete pod "$terminating_pod" \
+            --force --grace-period=0 --wait=false 2>/dev/null || true
+          ;;
+      esac
+    done < <($kc -n kube-system get pods \
+      -o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.name}{"\n"}{end}' \
+      2>/dev/null || true)
 
     if ! cilium install \
       --kubeconfig "$KUBE/admin.conf" \
@@ -679,6 +873,17 @@ apply_manifests() {
         return 1
       fi
     fi
+
+    # `cilium install --wait` can time out while the kubelet is recovering
+    # stale runtime state even though the resources were created successfully.
+    # Do not continue with CoreDNS and the remaining workloads until the agent,
+    # operator and an end-to-end probe all confirm that the CNI is functional.
+    log "Waiting for Cilium CNI to become functional..."
+    if ! cilium status --kubeconfig "$KUBE/admin.conf" \
+        --wait --wait-duration 5m --brief >/dev/null 2>&1 || ! cilium_healthy; then
+      log "FATAL: Cilium resources exist, but the CNI did not become functional"
+      return 1
+    fi
   fi
   log "Cilium ready."
 
@@ -687,7 +892,7 @@ apply_manifests() {
 
   # Apply CoreDNS
   log "Applying CoreDNS..."
-  $kc apply -f "$MANIFESTS/built-in/coredns.yaml" 2>&1 | tail -3
+  $kc apply -f "$MANIFESTS/built-in/coredns" 2>&1 | tail -6
   log "CoreDNS applied."
 
   # Deploy Rook-Ceph operator
@@ -726,10 +931,10 @@ apply_manifests() {
   $kc -n rook-ceph rollout status deploy/rook-ceph-operator --timeout=300s 2>&1 | tail -2
   log "Rook operator deployed."
 
-  # Create Ceph cluster (single-node, loop device OSD) + block pool + storage class
-  log "Creating Ceph cluster (single-node, loop OSD)..."
-  $kc apply -f "$MANIFESTS/built-in/rook-ceph-cluster.yaml" 2>&1 | tail -5
-  log "Ceph cluster manifest applied (operator will reconcile)."
+  # Create Ceph cluster, storage resources and dashboard.
+  log "Creating Ceph cluster (single-node, loop OSD) and dashboard..."
+  $kc apply -k "$MANIFESTS/built-in/ceph" 2>&1 | tail -9
+  log "Ceph manifests applied (operator will reconcile the cluster)."
 
   # Idempotent OSD recovery: wait for the OSD to be Ready; if it crash-loops
   # (loop backing lost after a container restart), re-attach /dev/loop0 and
@@ -738,13 +943,45 @@ apply_manifests() {
 
   # Apply HAProxy Ingress Controller
   log "Applying HAProxy Ingress Controller..."
-  $kc apply -f "$MANIFESTS/built-in/haproxy-ingress.yaml" 2>&1 | tail -5
+  $kc apply -f "$MANIFESTS/built-in/haproxy-ingress" 2>&1 | tail -7
   log "HAProxy Ingress Controller applied."
+
+  # Apply MetalLB (Layer 2 — LoadBalancer IPs for ingress/DNS). CRDs first to
+  # avoid a race with the IPAddressPool/L2Advertisement custom resources.
+  log "Applying MetalLB CRDs..."
+  $kc apply -f "$MANIFESTS/built-in/metallb/00-crds.yaml" 2>&1 | tail -3
+  $kc -n metallb-system wait --for=condition=Established \
+    crd/ipaddresspools.metallb.io --timeout=90s 2>&1 | tail -1 || \
+    log "WARN: MetalLB IPAddressPool CRD not established yet (continuing)"
+  log "Applying MetalLB (controller, speaker, pool, advert)..."
+  $kc apply -k "$MANIFESTS/built-in/metallb" 2>&1 | tail -9
+  log "MetalLB applied."
 
   # Apply metrics-server (metrics.k8s.io API — kubectl top / HPA)
   log "Applying metrics-server..."
-  $kc apply -f "$MANIFESTS/built-in/metrics-server.yaml" 2>&1 | tail -5
+  $kc apply -f "$MANIFESTS/built-in/metrics-server" 2>&1 | tail -9
   log "metrics-server applied."
+
+  # Apply cert-manager (issues internal TLS certs for *.lan from the mkcert
+  # CA). CRDs first, then wait for the controller before ClusterIssuer/Cert.
+  # NOTE: *.lan is used instead of *.local because Android/macOS resolve
+  # .local via mDNS, never via unicast DNS (AdGuard) — see README.
+  log "Applying cert-manager..."
+  $kc apply -f "$MANIFESTS/built-in/cert-manager/00-crds.yaml" 2>&1 | tail -3
+  $kc apply -f "$MANIFESTS/built-in/cert-manager/01-namespace.yaml" 2>&1 | tail -1
+  $kc apply -k "$MANIFESTS/built-in/cert-manager" 2>&1 | tail -9
+  $kc -n cert-manager rollout status deploy/cert-manager --timeout=180s 2>&1 | tail -1
+  log "cert-manager applied."
+
+  # Apply Argo CD (server-side apply is required for its large CRDs). The
+  # version is supplied at runtime so upgrades do not require editing files.
+  log "Applying Argo CD $ARGOCD_VERSION..."
+  $kc apply --server-side --force-conflicts \
+    -f "$MANIFESTS/built-in/argocd/namespace.yaml" 2>&1 | tail -2
+  $kc apply --server-side --force-conflicts -n argocd \
+    -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml" \
+    2>&1 | tail -5
+  log "Argo CD $ARGOCD_VERSION applied."
 
   # Final stale-state pass: pods only get marked Unknown once the kubelet
   # finishes reconciling (async), so the early cleanup can miss them — a
@@ -773,7 +1010,13 @@ main() {
   generate_pki
   generate_kubeconfigs
 
+  # Storage prerequisites must exist before kubelet can revive persisted Rook
+  # and CSI pods from containerd state.
+  setup_ceph_osd_loop
+  start_udevd
+
   start_containerd
+  cleanup_orphaned_containerd_records
   start_etcd
   start_apiserver
   start_controller_manager
@@ -781,14 +1024,9 @@ main() {
   start_kubelet
   start_kube_proxy
 
-  # Setup loop device for Ceph OSD block storage
-  setup_ceph_osd_loop
-
-  # Start udevd (required by ceph-volume for OSD device detection)
-  start_udevd
-
   # Apply manifests in background so we can `wait` on main processes
   apply_manifests &
+  APPLY_PID=$!
 
   log "All components running. Waiting..."
   wait "${PIDS[@]}"

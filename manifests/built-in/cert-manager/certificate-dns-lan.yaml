@@ -1,0 +1,14 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dns-lan
+  namespace: infra
+spec:
+  secretName: dns-lan-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: dns.lan
+  dnsNames:
+    - dns.lan
+    - "*.lan"

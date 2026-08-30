@@ -53,6 +53,18 @@ Empacotado numa **imagem mínima baseada em Debian** via multi-stage build (sem 
 
 ## Quick Start
 
+Copie `.env.example` para `.env` e informe o IP Tailscale desta máquina
+(`tailscale ip -4`):
+
+```dotenv
+ARGOCD_VERSION=v3.5.1
+TAILSCALE_IP=100.x.y.z
+```
+
+O Docker Compose carrega esse arquivo automaticamente. Ele é ignorado pelo Git
+para que cada ambiente possa escolher sua versão do Argo CD e seu endereço
+Tailscale.
+
 ```bash
 # Build
 docker compose build
@@ -171,11 +183,12 @@ entrypoint.sh
     ├── taint removal (permite workloads)
     ├── cilium install (CNI, reinstalação limpa a cada boot)
     ├── aguarda Node Ready
-    ├── kubectl apply coredns.yaml
+    ├── kubectl apply -f coredns/
     ├── kubectl apply rook CRDs + common + CSI operator + operator
     ├── patch ROOK_CEPH_ALLOW_LOOP_DEVICES=true (verificado)
-    ├── kubectl apply rook-ceph-cluster.yaml (cluster Ceph + pools + SC)
-    └── kubectl apply haproxy-ingress.yaml
+    ├── kubectl apply -k ceph/ (cluster Ceph + pools + SC + dashboard)
+    ├── kubectl apply -f haproxy-ingress/
+    └── kubectl apply -f metrics-server/
 ```
 
 ---
@@ -240,7 +253,7 @@ docker compose build --build-arg TARGETARCH=arm64
 | `ROOK_VERSION` | `v1.20.3` | Versão do operador Rook (manifests baixados dessa tag) |
 | `TARGETARCH` | `amd64` | Arquitetura alvo |
 
-> A **versão da imagem do Ceph** é definida em `manifests/built-in/rook-ceph-cluster.yaml` (`quay.io/ceph/ceph:v20.2.2` — pinada na versão oficialmente testada com o Rook 1.20.3; **não** usar a tag flutuante `:v20`).
+> A **versão da imagem do Ceph** é definida em `manifests/built-in/ceph/01-ceph-cluster.yaml` (`quay.io/ceph/ceph:v20.2.2` — pinada na versão oficialmente testada com o Rook 1.20.3; **não** usar a tag flutuante `:v20`).
 
 ### Variáveis de Ambiente (runtime)
 
@@ -248,6 +261,14 @@ docker compose build --build-arg TARGETARCH=arm64
 |---|---|---|
 | `NODE_NAME` | `k8s-one` | Nome do nó no cluster |
 | `ROOK_OSD_SIZE` | `30G` | Tamanho da imagem sparse do OSD (`/var/lib/rook/osd.img`) |
+| `ARGOCD_VERSION` | `v3.5.1` | Versão do Argo CD instalada no boot (formato: `vX.Y.Z`) |
+
+Defina `ARGOCD_VERSION` no arquivo `.env` da raiz. Depois de alterar a versão,
+recrie o container para que ela seja aplicada durante a inicialização:
+
+```bash
+docker compose up -d --force-recreate
+```
 
 ### Parâmetros de Rede (entrypoint.sh)
 
@@ -453,19 +474,62 @@ k8s-one/
 │
 └── manifests/                          # GITIGNORED — montado ro no container
     ├── built-in/                       # Núcleo: aplicado pelo entrypoint.sh no boot
-    │   ├── coredns.yaml                # CoreDNS (ServiceAccount, RBAC, Deployment, Service)
-    │   ├── haproxy-ingress.yaml        # HAProxy Ingress Controller (imagem pinada por digest)
-    │   └── rook-ceph-cluster.yaml      # CephCluster CR (single-node, OSD loop) + pools + SCs
-    ├── apps/                           # Sob demanda: aplicado com scripts/deploy-apps.sh
-    │   ├── kustomization.yaml          # secretGenerator lê apps/secrets/*.env
-    │   ├── headlamp.yaml               # Dashboard Headlamp (RBAC read-only)
-    │   ├── ceph-dashboard.yaml         # Dashboard Ceph (basic auth via kustomize secret)
-    │   ├── tileserver.yaml             # TileServer GL
-    │   ├── postgres.yaml               # PostgreSQL 16 PoC (PVC ceph-block)
-    │   └── secrets/                    # Envs do kustomize — NUNCA commitar (ver .gitignore)
-    │       ├── headlamp.env
-    │       ├── ceph.env
-    │       └── postgres.env
+    │   ├── coredns/                    # CoreDNS (um recurso Kubernetes por arquivo)
+    │   │   ├── 01-service-account.yaml
+    │   │   ├── 02-cluster-role.yaml
+    │   │   ├── 03-cluster-role-binding.yaml
+    │   │   ├── 04-configmap.yaml
+    │   │   ├── 05-deployment.yaml
+    │   │   └── 06-service.yaml
+    │   ├── haproxy-ingress/            # HAProxy Ingress (um recurso Kubernetes por arquivo)
+    │   │   ├── 01-namespace.yaml
+    │   │   ├── 02-service-account.yaml
+    │   │   ├── 03-cluster-role.yaml
+    │   │   ├── 04-cluster-role-binding.yaml
+    │   │   ├── 05-configmap.yaml
+    │   │   ├── 06-deployment.yaml
+    │   │   └── 07-service.yaml
+    │   ├── metrics-server/             # API de métricas (um recurso Kubernetes por arquivo)
+    │   │   ├── 01-service-account.yaml
+    │   │   ├── 02-aggregated-metrics-reader-cluster-role.yaml
+    │   │   ├── 03-metrics-server-cluster-role.yaml
+    │   │   ├── 04-auth-reader-role-binding.yaml
+    │   │   ├── 05-auth-delegator-cluster-role-binding.yaml
+    │   │   ├── 06-metrics-server-cluster-role-binding.yaml
+    │   │   ├── 07-service.yaml
+    │   │   ├── 08-deployment.yaml
+    │   │   └── 09-api-service.yaml
+    │   └── ceph/                       # Cluster Ceph, storage e dashboard
+    │       ├── 01-ceph-cluster.yaml
+    │       ├── 02-ceph-block-pool.yaml
+    │       ├── 03-block-storage-class.yaml
+    │       ├── 04-ceph-filesystem.yaml
+    │       ├── 05-filesystem-storage-class.yaml
+    │       ├── 06-dashboard-namespace.yaml
+    │       ├── 07-dashboard-service.yaml
+    │       ├── 08-dashboard-ingress.yaml
+    │       ├── kustomization.yaml
+    │       └── secrets/
+    │           └── ceph.env            # Basic auth do dashboard (nunca commitar)
+    │   ├── metallb/                     # MetalLB L2 (LB p/ serviços; ver "DNS Local" — não é o caminho externo)
+    │   │   ├── 00-crds.yaml … 07-webhook.yaml
+    │   │   ├── 02-ipaddresspool.yaml   # 192.168.1.200-250 (LAN)
+    │   │   └── kustomization.yaml
+    │   └── cert-manager/                # Certificados internos *.lan (CA mkcert)
+    │       ├── 00-crds.yaml … 05-webhooks.yaml
+    │       ├── cluster-issuer.yaml     # ClusterIssuer "local-ca" (CA do mkcert)
+    │       ├── certificate-dns-lan.yaml# dns.lan + *.lan → secret dns-lan-tls
+    │       ├── kustomization.yaml
+    │       └── secrets/
+    │           └── mkcert-ca.yaml      # CA raiz do mkcert (nunca commitar)
+    ├── apps/                           # Sob demanda; um recurso Kubernetes por arquivo YAML
+    │   ├── kustomization.yaml          # Compõe as pastas dos apps
+    │   ├── adguard/                    # AdGuard Home (DNS + interface web, PVCs CephFS)
+    │   ├── headlamp/                   # Dashboard Headlamp (RBAC read-only)
+    │   │   └── secrets/headlamp.env    # Basic auth (nunca commitar)
+    │   ├── postgres/                   # PostgreSQL 16 PoC (PVC ceph-block)
+    │   │   └── secrets/postgres.env    # Senha do banco (nunca commitar)
+    │   └── tileserver/                 # TileServer GL
     # rook-crds/common/csi-operator/operator.yaml  (baixados no build do Rook v1.20.3)
 ```
 
@@ -557,6 +621,26 @@ O Cilium é instalado via Cilium CLI, que gerencia o Helm chart e fornece monito
 - **Forward**: `8.8.8.8`, `1.1.1.1` (Google DNS, Cloudflare)
 - **Domínio**: `cluster.local`
 
+### DNS Local (AdGuard) & Certificados Internos
+
+O **AdGuard Home** (`apps/adguard`) é o DNS da LAN/tailnet e resolve os domínios internos `*.lan` apontando para o cluster. O CoreDNS continua responsável por `cluster.local` (DNS interno do cluster) — o AdGuard é para acesso das aplicações por nome.
+
+Fluxo de uma consulta a `https://dns.lan` (dashboard do AdGuard):
+
+```
+device → AdGuard (192.168.1.20:53)
+       → rewrite "dns.lan → 192.168.1.20"        (config em AdGuardHome.yaml, PVC adguard-conf-fs)
+       → browser → 192.168.1.20:443 (porta publicada do host)
+       → Ingress HAProxy (Host: dns.lan) → service adguard:80 → UI (3000)
+```
+
+- **Por que `.lan` e não `.local`**: `.local` é reservado para mDNS (RFC 6762). Android e macOS resolvem `.local` via mDNS e **nunca** via o DNS unicast — por isso `dns.local` falha nesses dispositivos mesmo com o DNS certo. `.lan` cai no resolvedor unicast normal.
+- **Rewrite no AdGuard**: `dns.lan → 192.168.1.20` (IP fixo do host na LAN — não o IP do MetalLB; ver abaixo).
+- **Acesso externo = portas publicadas do host**: o cluster roda numa rede docker isolada (`192.168.32.0/20`). O MetalLB (instalado em `built-in/metallb`) anuncia o IP LoadBalancer (`192.168.1.200`) **dentro dessa rede docker, não na WiFi** — logo **não é alcançável da LAN**. O caminho real é o `docker-compose` publicando `0.0.0.0:80/443 → NodePort 30080/30443` no IP físico do host (`192.168.1.20`). O rewrite aponta para `192.168.1.20`, **não** para `192.168.1.200`.
+- **Certificados (cert-manager + mkcert)**: o `ClusterIssuer local-ca` usa a **CA raiz do mkcert** (`~/.local/share/mkcert/rootCA.pem`, importada no Secret `cert-manager/mkcert-ca`). O `Certificate dns-lan` emite `dns.lan` + `*.lan` no Secret `infra/dns-lan-tls`, referenciado pelo Ingress. Para o navegador aceitar sem aviso, instale a CA do mkcert no trust store de cada dispositivo (no host já está via `mkcert -install`).
+- **Tailscale**: global nameserver = `192.168.1.20` e a rota `192.168.1.0/24` anunciada + aprovada — assim devices do tailnet resolvem `*.lan` via AdGuard e alcançam `192.168.1.20`. **IPv6 (RA) deve ficar desligado no roteador**: o anúncio de DNS IPv6 (`fc00::a/b`) é preferido pelo Android e interrompe a resolução de `*.lan`.
+- **Roteador (LAN)**: DHCP entrega `192.168.1.20` como DNS primário (fallback `1.1.1.1` opcional). Observação: com o host off, clientes com só o `192.168.1.20` perdem DNS.
+
 ---
 
 ## Storage
@@ -591,7 +675,7 @@ Replicação `size: 1` (nó único) — os dados **não são redundantes**; o OS
 
 - **Sintoma:** crash-loop do `ceph mgr` a cada ~15s: `NotImplementedError` em `node_proxy_fullreport` (crash dumps enchendo o data dir).
 - **Causa:** Ceph v20.2.3 + Rook 1.20.3 — o módulo `prometheus` do mgr do Ceph chama `node_proxy_fullreport()`, que o módulo rook não implementa. Upstream: [rook/rook#18124](https://github.com/rook/rook/issues/18124) / [tracker 79106](https://tracker.ceph.com/issues/79106).
-- **Estado atual:** o módulo mgr `rook` está **desabilitado** (`spec.mgr.modules[0].enabled: false` em `rook-ceph-cluster.yaml`) — workaround recomendado pelos mantenedores. O operador Rook **não** depende do módulo; só a CLI `ceph orch`/integração com dashboard é perdida.
+- **Estado atual:** o módulo mgr `rook` está **desabilitado** (`spec.mgr.modules[0].enabled: false` em `ceph/01-ceph-cluster.yaml`) — workaround recomendado pelos mantenedores. O operador Rook **não** depende do módulo; só a CLI `ceph orch`/integração com dashboard é perdida.
 - **Reabilitar** quando o fix upstream ([ceph/ceph#70967](https://github.com/ceph/ceph/pull/70967)) for lançado.
 
 ---
@@ -600,7 +684,7 @@ Replicação `size: 1` (nó único) — os dados **não são redundantes**; o OS
 
 ### Trocar o DNS upstream
 
-Edite `manifests/built-in/coredns.yaml`, seção `forward`:
+Edite `manifests/built-in/coredns/04-configmap.yaml`, seção `forward`:
 
 ```
 forward . 8.8.8.8 1.1.1.1 {
@@ -660,7 +744,7 @@ kubectl logs -n kube-system -l k8s-app=kube-dns
 
 Causas comuns:
 - Loop detection → já resolvido com forward para 8.8.8.8
-- Corefile syntax error → verificar `manifests/built-in/coredns.yaml`
+- Corefile syntax error → verificar `manifests/built-in/coredns/04-configmap.yaml`
 
 ### OSD não criado após reboot (0 OSDs)
 
