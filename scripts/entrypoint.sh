@@ -981,6 +981,12 @@ apply_manifests() {
   $kc apply --server-side --force-conflicts -n argocd \
     -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml" \
     2>&1 | tail -5
+  # Serve the UI via the ingress without an HTTP->HTTPS redirect loop: the
+  # ingress terminates TLS (mkcert) and forwards plain HTTP to the backend, so
+  # Argo must run with --insecure. Idempotent (args stay patched across reboots).
+  $kc -n argocd patch deployment argocd-server --type=json \
+    -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":["/usr/local/bin/argocd-server","--insecure"]}]' \
+    2>&1 | tail -1 || log "WARN: could not patch argocd-server --insecure"
   log "Argo CD $ARGOCD_VERSION applied."
 
   # Final stale-state pass: pods only get marked Unknown once the kubelet

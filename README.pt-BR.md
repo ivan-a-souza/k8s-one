@@ -652,6 +652,16 @@ kubectl -n headlamp get secret headlamp-admin-token -o jsonpath='{.data.token}' 
 
 O secret `headlamp-admin-token` (tipo `kubernetes.io/service-account-token`) é long-lived (K8s 1.24+). Se o Headlamp rodar com `--in-cluster`, ele pode autenticar sozinho via token projetado — o comando acima serve quando o prompt pedir token.
 
+### Argo CD (`argocd.lan`)
+
+Acessível em `https://argocd.lan` (Ingress ns `argocd` → `argocd-server:80`, TLS mkcert `argocd.lan`). **Requer `--insecure` no `argocd-server`**: sem ele, o ingress (que termina TLS e encaminha HTTP ao backend) causa loop de redirect 307. O patch é reaplicado pelo `entrypoint.sh` após aplicar o `install.yaml` upstream (persistente entre reboots).
+
+Login: usuário `admin`, senha:
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+```
+Manifestos do ingress/certificado: `manifests/apps/argocd/` (gitignored).
+
 ---
 
 ## Storage
