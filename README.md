@@ -637,6 +637,15 @@ device → AdGuard (192.168.1.20:53)
 - **External access = host-published ports**: the cluster runs inside an isolated docker network (`192.168.32.0/20`). MetalLB (in `built-in/metallb`) announces its LoadBalancer IP (`192.168.1.200`) **inside that docker network, not on the WiFi** — so it is **not reachable from the LAN**. The real path is `docker-compose` publishing `0.0.0.0:80/443 → NodePort 30080/30443` on the host's physical IP (`192.168.1.20`). The rewrite points to `192.168.1.20`, **not** `192.168.1.200`.
 - **Certificates (cert-manager + mkcert)**: the `ClusterIssuer local-ca` uses the **mkcert root CA** (`~/.local/share/mkcert/rootCA.pem`, imported into Secret `cert-manager/mkcert-ca`). The `Certificate dns-lan` issues `dns.lan` + `*.lan` into Secret `infra/dns-lan-tls`, referenced by the Ingress. To avoid browser warnings, install the mkcert CA into each device's trust store (already done on the host via `mkcert -install`).
 - **Tailscale**: global nameserver = `192.168.1.20` and the `192.168.1.0/24` route advertised + approved — tailnet devices resolve `*.lan` via AdGuard and reach `192.168.1.20`. **IPv6 (RA) must be off on the router**: the IPv6 DNS advertisement (`fc00::a/b`) is preferred by Android and breaks `*.lan` resolution.
+
+### Remote access (outside the LAN, via Tailnet)
+
+Works from anywhere with Tailscale on: the tailnet DNS (global nameserver `192.168.1.20`) resolves `*.lan` via AdGuard, and the `192.168.1.0/24` subnet route forwards traffic to `192.168.1.20` (host) → Ingress → app. E.g. `https://argocd.lan` away from home.
+
+> **Gotcha (Termux):** Termux uses its **own** `resolv.conf` (`$PREFIX/etc/resolv.conf`, pointing at `8.8.8.8`) — so `nslookup`/`curl` inside Termux do **not** resolve `.lan`, even though the browser works. Diagnosis:
+> - `nslookup argocd.lan 192.168.1.20` → queries AdGuard directly (works).
+> - `nslookup argocd.lan 100.100.100.100` → tailnet MagicDNS (works if the tailnet DNS is applied on the device).
+> To test access, use the **browser** (it uses the system DNS).
 - **Router (LAN)**: DHCP hands out `192.168.1.20` as primary DNS (optional `1.1.1.1` fallback). Note: with the host down, clients that only have `192.168.1.20` lose DNS.
 
 ### Headlamp (`headlamp.lan`)
