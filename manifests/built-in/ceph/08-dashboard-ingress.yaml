@@ -1,0 +1,26 @@
+# DNS: CNAME ceph.naesquina.com.br -> <tunnel-uuid>.cfargotunnel.com
+# cloudflared config: ceph.naesquina.com.br -> http://k8s-one:30080
+# Nota: subdomínio de 1º nível p/ cobertura do Universal SSL (*.naesquina.com.br);
+# ceph.infra.naesquina.com.br falhava TLS com ERR_SSL_VERSION_OR_CIPHER_MISMATCH.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ceph-dashboard
+  namespace: ceph-dashboard
+  annotations:
+    haproxy.org/ingress.class: haproxy
+    haproxy.org/auth-type: basic-auth
+    haproxy.org/auth-userlist: users
+    haproxy.org/auth-secret: ceph-basic-auth
+spec:
+  rules:
+    - host: ceph.k8s-one
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ceph-dashboard-svc
+                port:
+                  number: 7000

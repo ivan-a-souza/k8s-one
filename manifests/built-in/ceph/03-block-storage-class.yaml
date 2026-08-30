@@ -1,0 +1,28 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ceph-block
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: rook-ceph.rbd.csi.ceph.com
+parameters:
+  clusterID: rook-ceph
+  pool: replicapool
+  imageFormat: "2"
+  imageFeatures: layering
+  # rbd-nbd (userspace) em vez de krbd (kernel): neste cluster o k8s roda dentro
+  # de um container Docker, então o mounter de kernel (krbd) não alcança o mon
+  # (ClusterIP 10.101.x.x é interno ao container) e todo I/O RBD fica pendurado
+  # em estado D, travando o mount. O rbd-nbd roda em userspace (dentro do
+  # container) e alcança o Ceph normalmente.
+  mounter: rbd-nbd
+  csi.storage.k8s.io/fstype: ext4
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate

@@ -1,0 +1,16 @@
+# Referência cross-namespace para o rook-ceph-mgr-dashboard: o ingress
+# controller HAProxy desta versão não suporta haproxy.org/service-namespace,
+# e selector de Service não atravessa namespaces; ExternalName é resolvido
+# pelo controller via DNS para o ClusterIP do service do mgr.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ceph-dashboard-svc
+  namespace: ceph-dashboard
+spec:
+  type: ExternalName
+  externalName: rook-ceph-mgr-dashboard.rook-ceph.svc.cluster.local
+  ports:
+    - name: http-dashboard
+      port: 7000
+      targetPort: 7000
