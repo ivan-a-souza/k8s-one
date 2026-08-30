@@ -659,6 +659,8 @@ Login: user `admin`, password:
 ```bash
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
 ```
+> **Tip:** login uses user `admin` + the password from the secret above (it matches the hash in `argocd-secret`/`admin.password`). If the browser rejects it, check **autofill/cache** (type the password manually; hard refresh or incognito) — it is not the headlamp/dns password.
+
 Ingress/cert manifests: `manifests/apps/argocd/` (gitignored).
 
 ---
