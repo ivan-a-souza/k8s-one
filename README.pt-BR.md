@@ -525,8 +525,7 @@ k8s-one/
     ├── apps/                           # Sob demanda; um recurso Kubernetes por arquivo YAML
     │   ├── kustomization.yaml          # Compõe as pastas dos apps
     │   ├── adguard/                    # AdGuard Home (DNS + interface web, PVCs CephFS)
-    │   ├── headlamp/                   # Dashboard Headlamp (RBAC read-only)
-    │   │   └── secrets/headlamp.env    # Basic auth (nunca commitar)
+    │   ├── headlamp/                   # Dashboard Headlamp (RBAC view/read-only, login via SA token)
     │   ├── postgres/                   # PostgreSQL 16 PoC (PVC ceph-block)
     │   │   └── secrets/postgres.env    # Senha do banco (nunca commitar)
     │   └── tileserver/                 # TileServer GL
@@ -640,6 +639,18 @@ device → AdGuard (192.168.1.20:53)
 - **Certificados (cert-manager + mkcert)**: o `ClusterIssuer local-ca` usa a **CA raiz do mkcert** (`~/.local/share/mkcert/rootCA.pem`, importada no Secret `cert-manager/mkcert-ca`). O `Certificate dns-lan` emite `dns.lan` + `*.lan` no Secret `infra/dns-lan-tls`, referenciado pelo Ingress. Para o navegador aceitar sem aviso, instale a CA do mkcert no trust store de cada dispositivo (no host já está via `mkcert -install`).
 - **Tailscale**: global nameserver = `192.168.1.20` e a rota `192.168.1.0/24` anunciada + aprovada — assim devices do tailnet resolvem `*.lan` via AdGuard e alcançam `192.168.1.20`. **IPv6 (RA) deve ficar desligado no roteador**: o anúncio de DNS IPv6 (`fc00::a/b`) é preferido pelo Android e interrompe a resolução de `*.lan`.
 - **Roteador (LAN)**: DHCP entrega `192.168.1.20` como DNS primário (fallback `1.1.1.1` opcional). Observação: com o host off, clientes com só o `192.168.1.20` perdem DNS.
+
+### Headlamp (`headlamp.lan`)
+
+Dashboard acessível em `https://headlamp.lan` (ingress roteia pelo Host; cert mkcert `headlamp.lan`). O basic-auth do HAProxy foi removido — o login é o **próprio login do Headlamp** (bearer token). RBAC: SA `headlamp-admin` (ns `headlamp`) com ClusterRole **`view`** (somente leitura).
+
+Extrair o token persistente da Service Account para logar:
+
+```bash
+kubectl -n headlamp get secret headlamp-admin-token -o jsonpath='{.data.token}' | base64 -d
+```
+
+O secret `headlamp-admin-token` (tipo `kubernetes.io/service-account-token`) é long-lived (K8s 1.24+). Se o Headlamp rodar com `--in-cluster`, ele pode autenticar sozinho via token projetado — o comando acima serve quando o prompt pedir token.
 
 ---
 

@@ -524,8 +524,7 @@ k8s-one/
     ├── apps/                           # On-demand; one Kubernetes resource per YAML file
     │   ├── kustomization.yaml          # Composes the app directories
     │   ├── adguard/                    # AdGuard Home (DNS + web UI, CephFS PVCs)
-    │   ├── headlamp/                   # Headlamp dashboard (read-only RBAC)
-    │   │   └── secrets/headlamp.env    # Basic auth (never commit)
+    │   ├── headlamp/                   # Headlamp dashboard (view/read-only RBAC, SA-token login)
     │   ├── postgres/                   # PostgreSQL 16 PoC (ceph-block PVC)
     │   │   └── secrets/postgres.env    # Database password (never commit)
     │   └── tileserver/                 # TileServer GL
@@ -639,6 +638,18 @@ device → AdGuard (192.168.1.20:53)
 - **Certificates (cert-manager + mkcert)**: the `ClusterIssuer local-ca` uses the **mkcert root CA** (`~/.local/share/mkcert/rootCA.pem`, imported into Secret `cert-manager/mkcert-ca`). The `Certificate dns-lan` issues `dns.lan` + `*.lan` into Secret `infra/dns-lan-tls`, referenced by the Ingress. To avoid browser warnings, install the mkcert CA into each device's trust store (already done on the host via `mkcert -install`).
 - **Tailscale**: global nameserver = `192.168.1.20` and the `192.168.1.0/24` route advertised + approved — tailnet devices resolve `*.lan` via AdGuard and reach `192.168.1.20`. **IPv6 (RA) must be off on the router**: the IPv6 DNS advertisement (`fc00::a/b`) is preferred by Android and breaks `*.lan` resolution.
 - **Router (LAN)**: DHCP hands out `192.168.1.20` as primary DNS (optional `1.1.1.1` fallback). Note: with the host down, clients that only have `192.168.1.20` lose DNS.
+
+### Headlamp (`headlamp.lan`)
+
+Dashboard at `https://headlamp.lan` (ingress routes by Host; mkcert cert `headlamp.lan`). HAProxy basic-auth was removed — login is **Headlamp's own login** (bearer token). RBAC: SA `headlamp-admin` (ns `headlamp`) bound to ClusterRole **`view`** (read-only).
+
+Extract the persistent Service Account token to log in:
+
+```bash
+kubectl -n headlamp get secret headlamp-admin-token -o jsonpath='{.data.token}' | base64 -d
+```
+
+The `headlamp-admin-token` secret (type `kubernetes.io/service-account-token`) is long-lived (K8s 1.24+). Since Headlamp runs with `--in-cluster`, it may authenticate automatically via the projected token — the command above is for when the login prompt asks for a token.
 
 ---
 
