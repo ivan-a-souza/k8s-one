@@ -52,10 +52,20 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
+        startupProbe:
+          # The controller takes ~30s to bind the health port; without this the
+          # liveness probe kills the fresh pod during a rollout.
+          httpGet:
+            path: /healthz
+            port: 1042
+          periodSeconds: 10
+          failureThreshold: 30
         livenessProbe:
           httpGet:
             path: /healthz
             port: 1042
+          periodSeconds: 10
+          failureThreshold: 3
         ports:
         - name: http
           containerPort: 8080
