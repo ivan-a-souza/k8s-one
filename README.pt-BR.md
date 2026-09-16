@@ -527,7 +527,9 @@ k8s-one/
 ├── scripts/
 │   ├── entrypoint.sh                   # Orquestração: PKI, configs, processos, manifests
 │   ├── deploy-apps.sh                  # Aplica manifests/apps via kustomize (sem docker cp)
-│   └── rbd-device-watch.sh             # Cria device-nodes /dev/rbdN (krbd com noudev)
+│   ├── create-secrets.sh               # Cria/atualiza Secrets a partir de manifests/**/secrets/
+│   ├── rbd-nbd-reaper.sh               # Desmapeia rbd-nbd órfãos (boot; dry-run por padrão)
+│   └── fix-rbd-stale.sh                # Recuperação manual de mapeamentos rbd-nbd órfãos
 │
 ├── configs/
 │   └── containerd-config.toml          # containerd: runc + cgroupfs + overlayfs
@@ -847,6 +849,24 @@ kubectl describe pod <pod-name> -n <namespace>
 Causas comuns:
 - Cilium ainda não instalou o CNI → aguardar cilium-agent ficar Running
 - Erro de mount propagation → verificar se `/sys` está montado rw
+
+### PVC preso em ContainerCreating (`rbd image ... is still being used`)
+
+Sintoma nos eventos do pod: `rbd image ... is still being used` ou `rbd-nbd: cookie mismatch`.
+
+Causa: o StorageClass `ceph-block` usa `mounter: rbd-nbd`; mapeamentos `rbd-nbd` podem
+sobreviver à recriação de pods/plugin e o healer do cephcsi não consegue reaproveitá-los.
+
+Recuperação manual (no host):
+
+```bash
+scripts/fix-rbd-stale.sh            # dry-run: mostra o que faria
+scripts/fix-rbd-stale.sh --apply    # desmapeia os órfãos (--all p/ todos)
+```
+
+No boot, o `rbd-nbd-reaper.sh` roda automaticamente: desmapeia mapeamentos cujo
+`volumeHandle` não tem `VolumeAttachment` em `Attached=true` para o nó. É **dry-run por
+padrão**; ative com `RBD_REAPER_DRY_RUN=0` no `.env` (requer rebuild/recreate).
 
 ### CoreDNS CrashLoopBackOff
 

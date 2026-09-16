@@ -165,12 +165,9 @@ setup_mounts() {
   fi
 
   # Docker hands the container a plain tmpfs /dev, which does NOT auto-create
-  # device nodes for kernel block devices (e.g. /dev/rbdN from the krbd RBD
-  # mounter). `rbd map --options noudev` maps the device but its post-check
-  # fails because /dev/rbdN only appears after the 1s rbd-device-watch poll —
-  # a race that left RBD volumes stuck in ContainerCreating. Mounting devtmpfs
-  # makes the kernel create /dev/rbdN instantly (and also exposes loop devices
-  # for the Ceph OSD).
+  # device nodes for kernel block devices (e.g. /dev/nbdN for the rbd-nbd
+  # mounter, /dev/rbdN for krbd). Mounting devtmpfs makes the kernel create
+  # them instantly (and also exposes loop devices for the Ceph OSD).
   if ! grep -q ' /dev devtmpfs ' /proc/self/mounts 2>/dev/null; then
     if mount -t devtmpfs devtmpfs /dev 2>/dev/null; then
       log "devtmpfs mounted on /dev."
@@ -666,19 +663,6 @@ SYSTEMCTL
     udevadm trigger --action=add --subsystem-match=block 2>/dev/null || true
     udevadm settle --timeout=10 2>/dev/null || true
   fi
-
-  # Start the RBD device-node watcher (krbd mounter uses --options noudev, so
-  # the kernel does not emit uevents and /dev/rbdN nodes are not auto-created)
-  if [ -x /usr/local/bin/rbd-device-watch.sh ]; then
-    # comm is truncated to 15 chars: "rbd-device-watc"
-    if ! grep -q rbd-device-watc /proc/*/comm 2>/dev/null; then
-      log "Starting RBD device watcher..."
-      /usr/local/bin/rbd-device-watch.sh >/tmp/rbd-watch.out 2>&1 &
-      sleep 1
-      grep -q rbd-device-watc /proc/*/comm 2>/dev/null && log "RBD device watcher started." \
-        || log "WARNING: RBD device watcher failed to start"
-    fi
-  fi
 }
 
 # ── Cilium CNI health check ──────────────────────────────────────────────
@@ -783,6 +767,28 @@ cleanup_stale_state() {
       $kc delete volumeattachment "$va" 2>/dev/null || true
     fi
   done
+}
+
+# ── Start the rbd-nbd orphan reaper ───────────────────────────────────────
+# The ceph-block StorageClass uses mounter=rbd-nbd (krbd can't reach the mon
+# from inside the container). Stale rbd-nbd mappings can survive pod/plugin
+# restarts and leave PVCs stuck in ContainerCreating ("is still being used" /
+# "cookie mismatch"). The reaper unmaps mappings whose volumeHandle has no
+# VolumeAttachment in Attached=true state for this node. Dry-run by default;
+# set RBD_REAPER_DRY_RUN=0 to actually unmap.
+start_rbd_reaper() {
+  [ -x /usr/local/bin/rbd-nbd-reaper.sh ] || { log "WARNING: rbd-nbd-reaper.sh not found"; return 0; }
+  # comm is truncated to 15 chars: "rbd-nbd-reaper"
+  if grep -q rbd-nbd-reaper /proc/*/comm 2>/dev/null; then
+    log "rbd-nbd reaper already running."
+    return 0
+  fi
+  log "Starting rbd-nbd reaper (dry_run=${RBD_REAPER_DRY_RUN:-1})..."
+  KUBECONFIG="$KUBE/admin.conf" NODE_NAME="$NODE_NAME" \
+    /usr/local/bin/rbd-nbd-reaper.sh >/tmp/rbd-reaper.out 2>&1 &
+  sleep 1
+  grep -q rbd-nbd-reaper /proc/*/comm 2>/dev/null && log "rbd-nbd reaper started." \
+    || log "WARNING: rbd-nbd reaper failed to start"
 }
 
 # ── Post-init: apply manifests ────────────────────────────────────────────
@@ -1000,6 +1006,9 @@ apply_manifests() {
     sleep 10
   done
   log "Stale-state cleanup finished."
+
+  # Start the rbd-nbd orphan reaper (dry-run unless RBD_REAPER_DRY_RUN=0)
+  start_rbd_reaper
 
   log "============================================="
   log "  K8s-One cluster is READY!"

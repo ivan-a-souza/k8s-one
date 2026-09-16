@@ -126,8 +126,8 @@ COPY --from=builder /build/manifests/ /opt/manifests/
 # ── Configs & scripts ─────────────────────────────────────────────────────
 COPY configs/containerd-config.toml /etc/containerd/config.toml
 COPY scripts/entrypoint.sh /scripts/entrypoint.sh
-COPY scripts/rbd-device-watch.sh /usr/local/bin/rbd-device-watch.sh
-RUN chmod +x /scripts/entrypoint.sh /usr/local/bin/rbd-device-watch.sh
+COPY scripts/rbd-nbd-reaper.sh /usr/local/bin/rbd-nbd-reaper.sh
+RUN chmod +x /scripts/entrypoint.sh /usr/local/bin/rbd-nbd-reaper.sh
 
 # ── Create required directories ──────────────────────────────────────────
 RUN mkdir -p \

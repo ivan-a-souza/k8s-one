@@ -8,6 +8,9 @@ services:
     hostname: k8s-one
     privileged: true
     cgroup: host
+    environment:
+      # rbd-nbd orphan reaper: 1 = dry-run (default, só loga), 0 = desmapeia.
+      RBD_REAPER_DRY_RUN: "${RBD_REAPER_DRY_RUN:-1}"
     tmpfs:
       - /run
       - /tmp
