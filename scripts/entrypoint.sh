@@ -203,8 +203,12 @@ gen_ca() {
   local name=$1 cn=$2 dir=${3:-$PKI}
   [ -f "$dir/$name.crt" ] && return 0
   openssl genrsa -out "$dir/$name.key" 2048 2>/dev/null
+  # keyUsage adicionado: clientes TLS estritos (OpenSSL 3.x / Python 3.13+)
+  # rejeitam CA sem a extensão. Ex.: sidecars do Grafana (kiwigrid/k8s-sidecar).
   openssl req -x509 -new -nodes -key "$dir/$name.key" -sha256 -days 3650 \
-    -out "$dir/$name.crt" -subj "/CN=$cn" 2>/dev/null
+    -out "$dir/$name.crt" -subj "/CN=$cn" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
 }
 
 gen_cert() {
@@ -213,7 +217,8 @@ gen_cert() {
   local subj="/CN=$cn"
   [ -n "$org" ] && subj="/O=$org$subj"
   openssl genrsa -out "$dir/$name.key" 2048 2>/dev/null
-  local ext="extendedKeyUsage=clientAuth,serverAuth"
+  # keyUsage adicionado (digitalSignature,keyEncipherment) além do EKU existente.
+  local ext="keyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=clientAuth,serverAuth"
   [ -n "$san" ] && ext="subjectAltName=$san\n$ext"
   openssl req -new -key "$dir/$name.key" -subj "$subj" 2>/dev/null | \
     openssl x509 -req -CA "$PKI/$ca.crt" -CAkey "$PKI/$ca.key" -CAcreateserial \
@@ -329,7 +334,22 @@ resolvConf: /etc/resolv.conf
 rotateCertificates: false
 serverTLSBootstrap: false
 failSwapOn: false
-enforceNodeAllocatable: []
+# Limites "nativos" do k8s-one (protege o host 23Gi/4cpu):
+#  - capacidade reportada = memória do HOST -> reservas grandes "mentem" pro
+#    scheduler (allocatable ~= 9Gi mem / 3 cpu para PODS).
+#  - enforceNodeAllocatable: [pods] faz o kubelet travar kubepods.slice em
+#    memory.max/cpu.max = allocatable (limite real de kernel p/ todos os pods).
+#  - evictionHard protege o host quando a memória disponível cai.
+enforceNodeAllocatable:
+  - pods
+kubeReserved:
+  cpu: 250m
+  memory: 2Gi
+systemReserved:
+  cpu: 750m
+  memory: 12Gi
+evictionHard:
+  memory.available: 1Gi
 EOF
 }
 
@@ -365,6 +385,20 @@ wait_for_node_ready() {
 }
 
 # ── Start components ──────────────────────────────────────────────────────
+# Enables cgroup controllers in the container's cgroup root. With `cgroup:
+# private` (docker-compose) the container's /sys/fs/cgroup root IS the docker
+# scope; controllers must be delegated (subtree_control) before kubelet can
+# create pod QoS cgroups under /kubepods. No-op/ignored when running with the
+# host cgroup namespace (controllers already enabled at the host root).
+enable_cgroup_delegation() {
+  local cg=/sys/fs/cgroup
+  if [ -w "$cg/cgroup.subtree_control" ]; then
+    echo "+cpu +memory +io +pids" > "$cg/cgroup.subtree_control" 2>/dev/null \
+      && log "cgroup controllers delegated on $cg" \
+      || log "WARN: could not enable cgroup.subtree_control on $cg"
+  fi
+}
+
 start_containerd() {
   log "Starting containerd..."
   containerd --config /etc/containerd/config.toml &
@@ -824,8 +858,16 @@ apply_manifests() {
   if cilium_healthy; then
     log "Cilium CNI healthy, skipping reinstall."
   else
-    log "Cilium CNI unhealthy, reinstalling..."
-    cilium uninstall --kubeconfig "$KUBE/admin.conf" 2>/dev/null || true
+    log "Cilium CNI not healthy yet; giving it time to warm up before deciding..."
+    local grace_tries=24
+    while [ "$grace_tries" -gt 0 ] && ! cilium_healthy; do
+      sleep 10; grace_tries=$((grace_tries - 1))
+    done
+    if cilium_healthy; then
+      log "Cilium CNI became healthy during the grace period; skipping reinstall."
+    else
+      log "Cilium CNI still unhealthy, reinstalling..."
+      cilium uninstall --kubeconfig "$KUBE/admin.conf" 2>/dev/null || true
     rm -rf /sys/fs/bpf/cilium/devices/* 2>/dev/null || true
 
     # Uninstall is async: the cilium-secrets namespace can linger in
@@ -882,14 +924,19 @@ apply_manifests() {
 
     # `cilium install --wait` can time out while the kubelet is recovering
     # stale runtime state even though the resources were created successfully.
-    # Do not continue with CoreDNS and the remaining workloads until the agent,
-    # operator and an end-to-end probe all confirm that the CNI is functional.
+    # The agent usually comes up moments after the wait expires (observed on a
+    # busy boot: "FATAL ... not functional" followed by a fully healthy CNI).
+    # So when the resources exist, degrade to a WARN and CONTINUE — aborting
+    # here skips the rest of apply_manifests (metrics-server/cert-manager/argo
+    # re-apply), which can leave the metrics.k8s.io APIService deleted by
+    # cleanup_stale_apiservices and never recreated -> kubectl top broken for
+    # the whole run. Next boot retries if the CNI really is dead.
     log "Waiting for Cilium CNI to become functional..."
     if ! cilium status --kubeconfig "$KUBE/admin.conf" \
         --wait --wait-duration 5m --brief >/dev/null 2>&1 || ! cilium_healthy; then
-      log "FATAL: Cilium resources exist, but the CNI did not become functional"
-      return 1
+      log "WARN: Cilium resources exist, but the CNI is not yet functional; continuing boot"
     fi
+    fi  # reinstall branch (was still unhealthy after the grace period)
   fi
   log "Cilium ready."
 
@@ -963,7 +1010,13 @@ apply_manifests() {
   $kc apply -k "$MANIFESTS/built-in/metallb" 2>&1 | tail -9
   log "MetalLB applied."
 
-  # Apply metrics-server (metrics.k8s.io API — kubectl top / HPA)
+  # Apply metrics-server (metrics.k8s.io API — kubectl top / HPA). Applied at
+  # the END of the boot, only once Cilium is up. cleanup_stale_apiservices
+  # deletes any leftover metrics APIService early in the boot, so this late
+  # apply is the authoritative (re)creation point. It must NOT run earlier:
+  # an APIService created while the CNI is still warming/being reinstalled
+  # stays unavailable, breaks namespace discovery and wedges cilium-secrets
+  # in Terminating (the exact deadlock cleanup_stale_apiservices prevents).
   log "Applying metrics-server..."
   $kc apply -f "$MANIFESTS/built-in/metrics-server" 2>&1 | tail -9
   log "metrics-server applied."
@@ -1036,6 +1089,7 @@ main() {
   start_apiserver
   start_controller_manager
   start_scheduler
+  enable_cgroup_delegation
   start_kubelet
   start_kube_proxy
 

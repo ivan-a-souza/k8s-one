@@ -9,6 +9,7 @@ services:
     privileged: true
     cgroup: host
     environment:
+      ARGOCD_VERSION: "${ARGOCD_VERSION:-v3.5.1}"
       # rbd-nbd orphan reaper: 1 = dry-run (default, só loga), 0 = desmapeia.
       RBD_REAPER_DRY_RUN: "${RBD_REAPER_DRY_RUN:-1}"
     tmpfs:
@@ -26,9 +27,32 @@ services:
       - ./data/tiles:/var/lib/tiles
       - ./manifests/built-in:/opt/manifests/built-in:ro
       - ./manifests/apps:/opt/manifests/apps:ro
+      - ./manifests/networking:/opt/manifests/networking:ro
+      - ./manifests/ops:/opt/manifests/ops:ro
+      - ./manifests/data:/opt/manifests/data:ro
+      - ./manifests/platform:/opt/manifests/platform:ro
     ports:
-      - "127.0.0.1:6443:6443"
-      - "100.67.186.94:6443:6443"
-      - "100.67.186.94:8082:30080"
-      - "100.67.186.94:8443:30443"
+      # 127.0.0.1:6443 removida — 0.0.0.0:6443 abaixo já cobre loopback
+      - "0.0.0.0:6443:6443"
+      - "0.0.0.0:53:53/tcp"
+      - "0.0.0.0:53:53/udp"
+      - "0.0.0.0:3000:3000"
+      - "0.0.0.0:80:30080"
+      - "0.0.0.0:443:30443"
+      - "0.0.0.0:30080:30080"
+      - "0.0.0.0:30443:30443"
+      - "0.0.0.0:8082:30080"
+      - "0.0.0.0:8443:30443"
     restart: unless-stopped
+    # PID 1 drains PVC consumers and detaches RBD/CephFS before stopping Ceph.
+    stop_grace_period: 5m
+    networks:
+      default:
+        ipv4_address: 192.168.32.2
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 192.168.32.0/20
+          gateway: 192.168.32.1

@@ -118,7 +118,7 @@ COPY --from=builder /build/cni/ /opt/cni/bin/
 
 # ── Manifests ─────────────────────────────────────────────────────────────
 # Somente os manifests do Rook (baixados no build) são assados na imagem.
-# Os manifests custom (coredns, haproxy, rook-ceph-cluster, apps) são
+# Os manifests custom (coredns, haproxy, ceph, apps) são
 # montados via volume no docker-compose (./manifests:/opt/manifests/...) —
 # NÃO devem ser COPYados aqui (são gitignored e mudam sem rebuild).
 COPY --from=builder /build/manifests/ /opt/manifests/
