@@ -7,6 +7,13 @@ metadata:
   namespace: haproxy-controller
 spec:
   replicas: 1
+  # Single replica + big request: a surge pod would never schedule on this
+  # single node (requests ~96%). maxSurge:0 tears the old pod down first.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       run: haproxy-ingress
@@ -37,10 +44,14 @@ spec:
           seccompProfile:
             type: RuntimeDefault
         resources:
-          limits:
-            memory: 2560Mi
+          # Uso real medido ~75-220MiB (7d). O request antigo de 2Gi bloqueava
+          # o scheduling no nó (requests a ~96%).
           requests:
-            memory: 2048Mi
+            cpu: 50m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
         livenessProbe:
           httpGet:
             path: /healthz

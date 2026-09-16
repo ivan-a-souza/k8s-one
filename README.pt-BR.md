@@ -529,7 +529,8 @@ k8s-one/
 │   ├── deploy-apps.sh                  # Aplica manifests/apps via kustomize (sem docker cp)
 │   ├── create-secrets.sh               # Cria/atualiza Secrets a partir de manifests/**/secrets/
 │   ├── rbd-nbd-reaper.sh               # Desmapeia rbd-nbd órfãos (boot; dry-run por padrão)
-│   └── fix-rbd-stale.sh                # Recuperação manual de mapeamentos rbd-nbd órfãos
+│   ├── fix-rbd-stale.sh                # Recuperação manual de mapeamentos rbd-nbd órfãos
+│   └── fix-nbd-stuck.sh                # Desconecta nbd mortos (container/Docker travado)
 │
 ├── configs/
 │   └── containerd-config.toml          # containerd: runc + cgroupfs + overlayfs
@@ -867,6 +868,36 @@ scripts/fix-rbd-stale.sh --apply    # desmapeia os órfãos (--all p/ todos)
 No boot, o `rbd-nbd-reaper.sh` roda automaticamente: desmapeia mapeamentos cujo
 `volumeHandle` não tem `VolumeAttachment` em `Attached=true` para o nó. É **dry-run por
 padrão**; ative com `RBD_REAPER_DRY_RUN=0` no `.env` (requer rebuild/recreate).
+
+### Container/Docker travado no rebuild (`did not receive an exit event`)
+
+Sintomas: `docker compose up -d` falha com `cannot stop container ... tried to kill
+container, but did not receive an exit event`, e/ou o `dockerd` fica preso em
+"Loading containers". Causa: o `rbd-nbd` do Ceph CSI usa `--io-timeout=0` (sem
+timeout); se o container for terminado com I/O pendente, o `systemd-udevd` fica em
+D-state num nbd morto e o container não finaliza.
+
+Recuperação (no host, com `sudo`):
+
+```bash
+# 1. Parar o Docker (se travar: sudo systemctl kill -s SIGKILL docker)
+sudo systemctl stop docker.socket docker
+
+# 2. Remover a task presa no containerd
+sudo ctr -n moby tasks list          # anote o ID (STATUS RUNNING/STOPPED)
+sudo ctr -n moby tasks rm <ID>
+sudo ctr -n moby containers rm <ID>
+
+# 3. Desconectar os nbd mortos
+sudo scripts/fix-nbd-stuck.sh --apply --yes
+
+# 4. Subir o Docker e recriar o cluster
+sudo systemctl start docker
+docker compose up -d
+```
+
+O `rbd-nbd-reaper.sh` previne a maioria dos casos; o procedimento acima é o
+último recurso quando o container não morre.
 
 ### CoreDNS CrashLoopBackOff
 

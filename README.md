@@ -528,7 +528,8 @@ k8s-one/
 │   ├── deploy-apps.sh                  # Applies manifests/apps via kustomize (no docker cp)
 │   ├── create-secrets.sh               # Creates/updates Secrets from manifests/**/secrets/
 │   ├── rbd-nbd-reaper.sh               # Unmaps orphaned rbd-nbd (boot; dry-run by default)
-│   └── fix-rbd-stale.sh                # Manual recovery of orphaned rbd-nbd mappings
+│   ├── fix-rbd-stale.sh                # Manual recovery of orphaned rbd-nbd mappings
+│   └── fix-nbd-stuck.sh                # Disconnects dead nbd (stuck container/Docker)
 │
 ├── configs/
 │   └── containerd-config.toml          # containerd: runc + cgroupfs + overlayfs
@@ -866,6 +867,36 @@ scripts/fix-rbd-stale.sh --apply    # unmap the orphans (--all for every device)
 At boot, `rbd-nbd-reaper.sh` runs automatically: it unmaps mappings whose
 `volumeHandle` has no `VolumeAttachment` in `Attached=true` for the node. It is
 **dry-run by default**; enable with `RBD_REAPER_DRY_RUN=0` in `.env` (needs a rebuild/recreate).
+
+### Container/Docker stuck on rebuild (`did not receive an exit event`)
+
+Symptoms: `docker compose up -d` fails with `cannot stop container ... tried to kill
+container, but did not receive an exit event`, and/or `dockerd` hangs on
+"Loading containers". Cause: the Ceph CSI `rbd-nbd` uses `--io-timeout=0` (no
+timeout); if the container is terminated with pending I/O, `systemd-udevd` gets
+stuck in D-state on a dead nbd and the container never finishes.
+
+Recovery (host, with `sudo`):
+
+```bash
+# 1. Stop Docker (if it hangs: sudo systemctl kill -s SIGKILL docker)
+sudo systemctl stop docker.socket docker
+
+# 2. Remove the stuck containerd task
+sudo ctr -n moby tasks list          # note the ID (STATUS RUNNING/STOPPED)
+sudo ctr -n moby tasks rm <ID>
+sudo ctr -n moby containers rm <ID>
+
+# 3. Disconnect the dead nbd devices
+sudo scripts/fix-nbd-stuck.sh --apply --yes
+
+# 4. Start Docker and recreate the cluster
+sudo systemctl start docker
+docker compose up -d
+```
+
+`rbd-nbd-reaper.sh` prevents most cases; the procedure above is the last resort
+when the container will not die.
 
 ### CoreDNS CrashLoopBackOff
 
