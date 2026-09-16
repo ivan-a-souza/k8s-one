@@ -33,18 +33,32 @@ spec:
         resource:
           master:
             requests:
-              cpu: "250m"
-              memory: 1Gi
+              cpu: "100m"
+              memory: 512Mi
             limits:
               cpu: "1"
               memory: 1Gi
           tserver:
             requests:
-              cpu: "500m"
-              memory: 1Gi
+              cpu: "250m"
+              memory: 768Mi
             limits:
               cpu: "1"
               memory: 2Gi
+        # ybCleanup e um sidecar injetado pelo chart (sleep 3600 + log_cleanup.sh)
+        # que NAO aparece no bloco `resource:` acima — o scheduler soma os dois.
+        # O default do chart reserva 0.25 cpu / 250Mi POR POD, ou seja 500m de CPU
+        # (17% dos 3 cores alocaveis do no) para dois `sleep`. O template so
+        # renderiza `resources:` quando a chave existe, entao estes valores mantem
+        # o sidecar bounded sem inflar o scheduling.
+        ybCleanup:
+          resources:
+            requests:
+              cpu: "10m"
+              memory: 32Mi
+            limits:
+              cpu: "100m"
+              memory: 128Mi
         # Probe de disco do chart usa timeout de 1s por padrao; no k8s-one o
         # storage e Ceph sobre nbd e o `sync` estoura 1s sob carga, reiniciando
         # os pods. Folga o timeout/periodo p/ tolerar IO lento.

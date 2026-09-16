@@ -310,10 +310,15 @@ generate_kubeconfigs() {
 }
 
 # ── Write kubelet config ──────────────────────────────────────────────────
+# /var/lib/kubelet e bind mount (./data/kubelet) e persiste entre restarts, entao
+# a config precisa ser REGENERAVEL: comparamos o conteudo desejado com o do disco
+# e so reescrevemos (com backup) quando muda. Sem isso, editar o heredoc abaixo
+# nao tinha efeito nenhum num cluster ja inicializado — a config ficava congelada
+# no bind mount e as mudancas no repo eram silenciosamente ignoradas.
 write_kubelet_config() {
-  [ -f /var/lib/kubelet/config.yaml ] && return 0
-  mkdir -p /var/lib/kubelet
-  cat > /var/lib/kubelet/config.yaml <<EOF
+  local cfg=/var/lib/kubelet/config.yaml
+  local desired
+  desired=$(cat <<EOF
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 authentication:
@@ -335,11 +340,12 @@ rotateCertificates: false
 serverTLSBootstrap: false
 failSwapOn: false
 # Limites "nativos" do k8s-one (protege o host 23Gi/4cpu):
-#  - capacidade reportada = memória do HOST -> reservas grandes "mentem" pro
-#    scheduler (allocatable ~= 9Gi mem / 3 cpu para PODS).
-#  - enforceNodeAllocatable: [pods] faz o kubelet travar kubepods.slice em
+#  - capacidade reportada = memoria do HOST -> reservas grandes "mentem" pro
+#    scheduler (allocatable = 23.2Gi - 12Gi - 2Gi - 1Gi = ~8.2Gi mem / 3 cpu).
+#  - enforceNodeAllocatable: [pods] faz o kubelet travar o cgroup kubepods em
 #    memory.max/cpu.max = allocatable (limite real de kernel p/ todos os pods).
-#  - evictionHard protege o host quando a memória disponível cai.
+#    Driver e cgroupfs, entao o path e /sys/fs/cgroup/kubepods (sem .slice).
+#  - evictionHard protege o host quando a memoria disponivel cai.
 enforceNodeAllocatable:
   - pods
 kubeReserved:
@@ -351,6 +357,26 @@ systemReserved:
 evictionHard:
   memory.available: 1Gi
 EOF
+)
+
+  mkdir -p /var/lib/kubelet
+
+  # $(...) remove os newlines finais dos dois lados -> comparacao estavel.
+  if [ -f "$cfg" ] && [ "$(cat "$cfg")" = "$desired" ]; then
+    log "kubelet config inalterada."
+    return 0
+  fi
+
+  if [ -f "$cfg" ]; then
+    local backup="$cfg.bak.$(date -u '+%Y%m%d%H%M%S')"
+    cp -a "$cfg" "$backup"
+    log "kubelet config mudou — backup em $backup"
+  fi
+
+  # Escrita atomica: nunca deixa config.yaml truncada se o container morrer no meio.
+  printf '%s\n' "$desired" > "$cfg.tmp"
+  mv "$cfg.tmp" "$cfg"
+  log "kubelet config escrita."
 }
 
 # ── Wait helpers ──────────────────────────────────────────────────────────

@@ -278,6 +278,58 @@ docker compose up -d --force-recreate
 | `SERVICE_CIDR` | `10.96.0.0/12` | ClusterIP CIDR |
 | `CLUSTER_DNS` | `10.96.0.10` | CoreDNS IP |
 
+### Resource Reserves (kubelet)
+
+The kubelet advertises the **host's** memory as node capacity (the container has no
+memory limit of its own), so the reserves below are how the cluster tells the
+scheduler the truth: they deliberately "lie downward" so that pods get a realistic
+budget while the host stays protected.
+
+| Setting | Value | Effect |
+|---|---|---|
+| `systemReserved` | `750m` / `12Gi` | Reserved for the host's own workload (desktop session, daemons) |
+| `kubeReserved` | `250m` / `2Gi` | Reserved for control plane + runtime (etcd, apiserver, kubelet, containerd) |
+| `evictionHard` | `memory.available: 1Gi` | Kubelet starts evicting pods below this |
+| `enforceNodeAllocatable` | `[pods]` | Pins the `kubepods` cgroup to `memory.max`/`cpu.max` = allocatable |
+
+On a 4 CPU / 23.2 GiB host that resolves to:
+
+```
+capacity         4 cpu      24346668Ki (23.2 GiB)
+ - kubeReserved    250m        2 GiB
+ - systemReserved  750m       12 GiB
+ - evictionHard      --        1 GiB
+ = allocatable     3 cpu      ~8.2 GiB   <- everything pods can ever use
+```
+
+Two consequences worth internalising:
+
+- **`kubectl top nodes` reports more than 100% memory.** `/proc/meminfo` is not
+  namespaced, so the kubelet reads the *host's* usage while the denominator is the
+  8.2 GiB allocatable. A `207%` figure is not a leak — it is the entire desktop.
+- **The only hard cap on the cluster is the `kubepods` cgroup.** The cgroup driver
+  is `cgroupfs`, so the path is `/sys/fs/cgroup/kubepods` (no `.slice`). The
+  container itself is unbounded (`Memory: 0`), and control-plane processes run
+  *outside* `kubepods`, covered only by the `systemReserved` reservation — not by
+  an enforced limit.
+
+**Requests are the scheduling budget.** The node's requests are what block rollouts:
+when they approach allocatable, a `maxSurge` replacement pod cannot be placed and
+matches `0/1 nodes are available: 1 Insufficient cpu`. Actual usage is far below
+requests here, so keep an eye on the ratio — and remember that chart-injected
+sidecars (e.g. Yugabyte's `ybCleanup`) add requests that do not appear in the
+values you wrote.
+
+The config is written by `write_kubelet_config()` in `scripts/entrypoint.sh` to
+`/var/lib/kubelet/config.yaml`, which lives on the `./data/kubelet` bind mount and
+therefore **persists across container restarts**. The function regenerates the file
+at boot whenever its content differs from the heredoc (keeping a timestamped
+`.bak`). A running kubelet does not reload its config, so **changes take effect only
+after a container restart**.
+
+> Do not shrink `systemReserved` to raise allocatable. It exists precisely because
+> the node shares RAM with the desktop; pods are expected to fit in ~8 GiB.
+
 ---
 
 ## Secrets
@@ -959,11 +1011,17 @@ docker compose up -d     # fresh start
 |---|---|---|
 | **Docker** | 24.0+ | 27.0+ |
 | **Docker Compose** | v2.20+ | v2.30+ |
-| **RAM** | 4 GB | 8 GB |
+| **RAM** | 16 GB | 24 GB |
 | **CPU** | 2 cores | 4 cores |
 | **Disk** | 10 GB (image + 30G sparse OSD) | 20 GB+ |
 | **OS** | Linux (kernel 5.10+) | Linux (kernel 6.x) |
 | **Arch** | amd64 | amd64 |
+
+> The RAM figures follow from the kubelet reserves, not from the cluster's own
+> footprint: `systemReserved` (12Gi) + `kubeReserved` (2Gi) + `evictionHard` (1Gi)
+> are subtracted from *host* capacity before pods get anything. A 16 GB host leaves
+> ~1 GiB for pods; 24 GB leaves ~9 GiB. See
+> [Resource Reserves](#resource-reserves-kubelet) for the full math.
 
 ### Ports
 
