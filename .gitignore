@@ -11,6 +11,11 @@ manifests/apps/
 # Segredos (envs do kustomize) — nunca versionar
 manifests/apps/*/secrets/
 manifests/built-in/*/secrets/
+manifests/networking/*/secrets/
+manifests/ops/*/secrets/
+manifests/data/*/secrets/
+manifests/platform/*/secrets/
+manifests/argocd/*/secrets/
 
 # Docker
 .env
@@ -29,3 +34,5 @@ Thumbs.db
 
 # Backups
 *.bak.*
+# Snapshots de etcd, PKI (CA keys) e kubeconfigs — NUNCA commitar
+backups/
