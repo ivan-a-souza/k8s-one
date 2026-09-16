@@ -1,0 +1,92 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: authentik
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    chart: authentik
+    repoURL: https://goauthentik.github.io/helm
+    targetRevision: 2026.8.1
+    helm:
+      releaseName: authentik
+      values: |
+        # Authentik 2026.8.1 — SSO/IdP no k8s-one (domínio platform).
+        # Banco = PostgreSQL bitnami embutido no chart (migrações Django/DDL exigem PG real;
+        # YugabyteDB fica no ns data p/ LiteLLM e apps YSQL). 2026.x não usa mais Redis.
+        authentik:
+          enabled: true
+          existingSecret:
+            secretName: authentik-config
+        postgresql:
+          enabled: true
+          auth:
+            username: authentik
+            # Senha vem do Secret gitignored (secrets/postgresql-auth.yaml),
+            # criado por scripts/create-secrets.sh. Nunca embutir aqui.
+            existingSecret: authentik-postgresql-auth
+            database: authentik
+          primary:
+            persistence:
+              enabled: true
+              storageClass: ceph-block
+              size: 5Gi
+        serviceAccount:
+          create: false
+        server:
+          replicas: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1024Mi
+          ingress:
+            enabled: true
+            annotations:
+              haproxy.org/ingress.class: haproxy
+              haproxy.org/ssl-cert-namespace: platform
+              haproxy.org/ssl-cert: authentik-tls
+            hosts:
+              - authentik.lan
+            tls:
+              - secretName: authentik-tls
+                hosts:
+                  - authentik.lan
+        worker:
+          replicas: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1024Mi
+        additionalObjects:
+          - apiVersion: cert-manager.io/v1
+            kind: Certificate
+            metadata:
+              name: authentik-tls
+              namespace: platform
+            spec:
+              secretName: authentik-tls
+              issuerRef:
+                name: local-ca
+                kind: ClusterIssuer
+              commonName: authentik.lan
+              dnsNames:
+                - authentik.lan
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

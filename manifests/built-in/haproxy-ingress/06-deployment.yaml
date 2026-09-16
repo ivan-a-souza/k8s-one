@@ -21,6 +21,9 @@ spec:
         image: haproxytech/kubernetes-ingress@sha256:3cdf2bb20dfb6cf31993df4ffa68e7c947f6119e98ad6982bfff6ee091c8646d
         args:
           - --configmap=haproxy-controller/haproxy-kubernetes-ingress
+          # Publica o IP do Service (MetalLB) no status.loadBalancer dos Ingress.
+          # Sem isso o ArgoCD marca Ingress como Progressing (getIngressHealth).
+          - --publish-service=haproxy-controller/haproxy-kubernetes-ingress
         securityContext:
           runAsNonRoot: true
           allowPrivilegeEscalation: false

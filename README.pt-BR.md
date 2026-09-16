@@ -36,6 +36,7 @@ Empacotado numa **imagem mínima baseada em Debian** via multi-stage build (sem 
 - [Arquitetura](#arquitetura)
 - [Volumes Persistentes](#volumes-persistentes)
 - [Configuração](#configuração)
+- [Segredos](#segredos)
 - [Acesso ao Cluster](#acesso-ao-cluster)
 - [Exemplos de Uso](#exemplos-de-uso)
 - [Estrutura do Projeto](#estrutura-do-projeto)
@@ -280,6 +281,65 @@ docker compose up -d --force-recreate
 
 ---
 
+## Segredos
+
+Nenhuma credencial é versionada. Os valores vivem em `manifests/**/secrets/`
+(ignorado pelo `.gitignore`) e são aplicados ao cluster por
+`scripts/create-secrets.sh`. As Applications do Argo CD apenas **referenciam**
+os Secrets via `existingSecret` — nunca contêm senha.
+
+### Onde ficam
+
+| Secret | Namespace | Arquivo-fonte (gitignored) | Usado por |
+|---|---|---|---|
+| `authentik-config` | `platform` | `manifests/argocd/authentik/secrets/authentik.env` | `authentik.existingSecret` |
+| `authentik-postgresql-auth` | `platform` | `manifests/argocd/authentik/secrets/postgresql-auth.yaml` | `postgresql.auth.existingSecret` |
+| `grafana-admin` | `monitoring` | `manifests/argocd/prometheus-stack/secrets/grafana-admin.yaml` | `grafana.admin.existingSecret` |
+| `mkcert-ca` | `cert-manager` | `manifests/built-in/cert-manager/secrets/mkcert-ca.yaml` | CA raiz do ClusterIssuer `local-ca` |
+
+Formatos:
+- `*.env` → criado com `kubectl create secret generic --from-env-file` (ex.: `authentik.env`).
+- `*.yaml` → manifest `kind: Secret` (com `stringData`) aplicado com `kubectl apply -f`.
+
+### Criar/atualizar
+
+```bash
+scripts/create-secrets.sh          # idempotente; usa ./kubeconfig (ou $KUBECONFIG)
+```
+
+Rodar **antes** de aplicar as Applications do Argo CD (o `existingSecret`
+precisa existir). Manualmente:
+
+```bash
+kubectl -n platform create secret generic authentik-config \
+  --from-env-file=manifests/argocd/authentik/secrets/authentik.env \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f manifests/argocd/authentik/secrets/postgresql-auth.yaml
+kubectl apply -f manifests/argocd/prometheus-stack/secrets/grafana-admin.yaml
+```
+
+### Ler
+
+```bash
+# uma chave do env do authentik
+kubectl -n platform get secret authentik-config -o jsonpath='{.data.AUTHENTIK_POSTGRESQL__PASSWORD}' | base64 -d
+# senha do Grafana
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d
+# todas as chaves de um secret
+kubectl -n platform get secret authentik-postgresql-auth -o jsonpath='{.data}' | jq
+```
+
+### Regras
+
+- **Nunca** commitar arquivos em `secrets/` nem embutir senha em `02-application.yaml`.
+- Trocar uma senha = editar o arquivo-fonte em `secrets/`, rodar o script e
+  reiniciar o workload. Para o PostgreSQL do authentik a senha é gravada no
+  banco na inicialização: além do Secret, rode `ALTER USER` no banco (ou
+  rotacione via `postgresql.passwordUpdateJob`).
+- Confirme que nada está rastreado: `git check-ignore manifests/argocd/*/secrets/*`.
+
+---
+
 ## Acesso ao Cluster
 
 ### Kubeconfig Externo
@@ -508,9 +568,8 @@ k8s-one/
     │       ├── 06-dashboard-namespace.yaml
     │       ├── 07-dashboard-service.yaml
     │       ├── 08-dashboard-ingress.yaml
-    │       ├── kustomization.yaml
-    │       └── secrets/
-    │           └── ceph.env            # Basic auth do dashboard (nunca commitar)
+    │       └── 09-dashboard-certificate.yaml
+    │       └── kustomization.yaml
     │   ├── metallb/                     # MetalLB L2 (LB p/ serviços; ver "DNS Local" — não é o caminho externo)
     │   │   ├── 00-crds.yaml … 07-webhook.yaml
     │   │   ├── 02-ipaddresspool.yaml   # 192.168.1.200-250 (LAN)
@@ -522,12 +581,20 @@ k8s-one/
     │       ├── kustomization.yaml
     │       └── secrets/
     │           └── mkcert-ca.yaml      # CA raiz do mkcert (nunca commitar)
+    ├── argocd/                          # Applications (Argo CD) — Helm charts
+    │   ├── authentik/
+    │   │   ├── 02-application.yaml      # existingSecret: authentik-config / authentik-postgresql-auth
+    │   │   └── secrets/                 # GITIGNORED (nunca commitar)
+    │   │       ├── authentik.env        # env do app (AUTHENTIK_*)
+    │   │       └── postgresql-auth.yaml # auth do PostgreSQL (postgres-password/password)
+    │   ├── prometheus-stack/
+    │   │   ├── 02-application.yaml      # existingSecret: grafana-admin
+    │   │   └── secrets/
+    │   │       └── grafana-admin.yaml   # admin do Grafana (admin-user/admin-password)
+    │   └── yugabyte/
+    │       └── 02-application.yaml
     ├── apps/                           # Sob demanda; um recurso Kubernetes por arquivo YAML
     │   ├── kustomization.yaml          # Compõe as pastas dos apps
-    │   ├── adguard/                    # AdGuard Home (DNS + interface web, PVCs CephFS)
-    │   ├── headlamp/                   # Dashboard Headlamp (RBAC view/read-only, login via SA token)
-    │   ├── postgres/                   # PostgreSQL 16 PoC (PVC ceph-block)
-    │   │   └── secrets/postgres.env    # Senha do banco (nunca commitar)
     │   └── tileserver/                 # TileServer GL
     # rook-crds/common/csi-operator/operator.yaml  (baixados no build do Rook v1.20.3)
 ```
@@ -672,6 +739,19 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 > **Dica:** o login usa o usuário `admin` + a senha do secret acima (confere com o hash em `argocd-secret`/`admin.password`). Se o browser rejeitar, confira **autofill/cache** (digite a senha manualmente; hard refresh ou aba anônima) — não é a senha do headlamp/dns.
 
 Manifestos do ingress/certificado: `manifests/apps/argocd/` (gitignored).
+
+### Ceph Dashboard (`ceph.lan`)
+
+Dashboard web do Ceph em `https://ceph.lan` (Ingress ns `ceph-dashboard` → `ceph-dashboard-svc` → `rook-ceph-mgr-dashboard:7000`). TLS usa cert mkcert **dedicado** `ceph-dashboard-tls` (emitido pelo `local-ca` para `ceph.lan`). O wildcard `*.lan` (`dns-lan-tls`) **não** é usado: os validadores rejeitam wildcard de label único como `*.lan` (`.lan` tratado como domínio apex), então cada app `.lan` tem seu próprio Certificate (mesmo padrão headlamp/argocd). O basic-auth do HAProxy foi removido; a autenticação é o **próprio login do dashboard do Ceph**.
+
+Login: usuário `admin`, senha:
+```bash
+docker exec k8s-one kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get secret rook-ceph-dashboard-password -o jsonpath='{.data.password}' | base64 -d
+```
+
+> **Nota:** a aba **Orchestrator** mostra "Orchestrator is not available: Module not found" — esperado. O módulo mgr `rook` está desabilitado (workaround de crash, ver Problemas Conhecidos).
+
+Manifestos: `manifests/built-in/ceph/` (`06-dashboard-namespace.yaml`, `07-dashboard-service.yaml`, `08-dashboard-ingress.yaml`, `09-dashboard-certificate.yaml`), aplicados no boot pelo `entrypoint.sh`.
 
 ---
 

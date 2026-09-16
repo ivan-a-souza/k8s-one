@@ -1,0 +1,75 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    chart: kube-prometheus-stack
+    repoURL: https://prometheus-community.github.io/helm-charts
+    targetRevision: 90.0.0
+    helm:
+      releaseName: kube-prometheus-stack
+      values: |
+        # Ajustes para single-node k8s-one (23GB RAM host, ceph-block default)
+        prometheus:
+          prometheusSpec:
+            replicas: 1
+            retention: 7d
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  storageClassName: ceph-block
+                  accessModes: ["ReadWriteOnce"]
+                  resources:
+                    requests:
+                      storage: 20Gi
+        alertmanager:
+          enabled: true
+          alertmanagerSpec:
+            replicas: 1
+        grafana:
+          # Senha vem do Secret gitignored (secrets/grafana-admin.yaml),
+          # criado por scripts/create-secrets.sh. Nunca embutir aqui.
+          admin:
+            existingSecret: grafana-admin
+          persistence:
+            enabled: true
+            storageClassName: ceph-block
+            accessModes: ["ReadWriteOnce"]
+            size: 10Gi
+          service:
+            type: ClusterIP
+          # Sidecars REATIVADOS (padrão do chart): o CA do k8s-one agora tem
+          # keyUsage (entrypoint.sh corrigido + CA rotacionado em 08/09/2026),
+          # então o kiwigrid/k8s-sidecar valida TLS normalmente.
+          sidecar:
+            datasources:
+              enabled: true
+            dashboards:
+              enabled: true
+        nodeExporter:
+          enabled: true
+        kubeStateMetrics:
+          enabled: true
+        prometheusOperator:
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 512Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
