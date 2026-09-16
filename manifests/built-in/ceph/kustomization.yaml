@@ -10,10 +10,4 @@ resources:
   - 06-dashboard-namespace.yaml
   - 07-dashboard-service.yaml
   - 08-dashboard-ingress.yaml
-
-secretGenerator:
-  - name: ceph-basic-auth
-    namespace: ceph-dashboard
-    envs: ["secrets/ceph.env"]
-    options:
-      disableNameSuffixHash: true
+  - 09-dashboard-certificate.yaml

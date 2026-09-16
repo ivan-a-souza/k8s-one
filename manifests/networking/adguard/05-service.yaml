@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: adguard
+  namespace: networking
+  labels:
+    app: adguard
+spec:
+  type: ClusterIP
+  selector:
+    app: adguard
+  ports:
+    - name: web
+      port: 80
+      targetPort: 3000
+      protocol: TCP
+    - name: setup
+      port: 3000
+      targetPort: 3000
+      protocol: TCP

@@ -1,7 +1,7 @@
-# DNS: CNAME ceph.naesquina.com.br -> <tunnel-uuid>.cfargotunnel.com
-# cloudflared config: ceph.naesquina.com.br -> http://k8s-one:30080
-# Nota: subdomínio de 1º nível p/ cobertura do Universal SSL (*.naesquina.com.br);
-# ceph.infra.naesquina.com.br falhava TLS com ERR_SSL_VERSION_OR_CIPHER_MISMATCH.
+# TLS: cert dedicado ceph-dashboard-tls (mkcert, issuer local-ca) — o wildcard
+# *.lan é rejeitado pelos validadores para hosts .lan de label único.
+# Acesso: https://ceph.lan — login admin do Ceph (rook-ceph-dashboard-password).
+# (Basic-auth do HAProxy removido — autenticação é feita pelo próprio dashboard.)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -9,12 +9,15 @@ metadata:
   namespace: ceph-dashboard
   annotations:
     haproxy.org/ingress.class: haproxy
-    haproxy.org/auth-type: basic-auth
-    haproxy.org/auth-userlist: users
-    haproxy.org/auth-secret: ceph-basic-auth
+    haproxy.org/ssl-cert-namespace: ceph-dashboard
+    haproxy.org/ssl-cert: ceph-dashboard-tls
 spec:
+  tls:
+    - hosts:
+        - ceph.lan
+      secretName: ceph-dashboard-tls
   rules:
-    - host: ceph.k8s-one
+    - host: ceph.lan
       http:
         paths:
           - path: /

@@ -8,4 +8,3 @@ resources:
   - 04-services.yaml
   - 05-webhooks.yaml
   - cluster-issuer.yaml
-  - certificate-dns-lan.yaml

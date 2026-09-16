@@ -1,0 +1,13 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: headlamp
+  namespace: ops
+spec:
+  secretName: headlamp-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: headlamp.lan
+  dnsNames:
+    - headlamp.lan

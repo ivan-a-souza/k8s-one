@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd
+  namespace: argocd
+  annotations:
+    haproxy.org/ingress.class: haproxy
+    haproxy.org/ssl-cert-namespace: argocd
+    haproxy.org/ssl-cert: argocd-tls
+spec:
+  tls:
+    - hosts:
+        - argocd.lan
+      secretName: argocd-tls
+  rules:
+    - host: argocd.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  number: 80

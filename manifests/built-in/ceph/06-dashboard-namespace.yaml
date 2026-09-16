@@ -1,7 +1,6 @@
 # Ceph Dashboard — interface web do cluster Ceph (Rook)
-# Acesso: https://ceph.naesquina.com.br
-# Camada 1: basic auth gerado pelo kustomization a partir de secrets/ceph.env.
-# Camada 2: login admin do Ceph, armazenado em rook-ceph-dashboard-password.
+# Acesso: https://ceph.lan (TLS mkcert *.lan; rewrite AdGuard -> 192.168.1.20)
+# Autenticação: login admin do Ceph (secret rook-ceph-dashboard-password).
 apiVersion: v1
 kind: Namespace
 metadata:

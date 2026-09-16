@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: adguard
+  namespace: networking
+  annotations:
+    haproxy.org/ingress.class: haproxy
+    haproxy.org/ssl-cert-namespace: networking
+    haproxy.org/ssl-cert: dns-lan-tls
+spec:
+  tls:
+    - hosts:
+        - dns.lan
+      secretName: dns-lan-tls
+  rules:
+    - host: dns.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: adguard
+                port:
+                  number: 80

@@ -1,0 +1,16 @@
+# Cert dedicado do Ceph Dashboard. O wildcard *.lan (dns-lan-tls) é rejeitado
+# pelos validadores para hosts de label único (.lan tratado como apex) — por isso
+# cada app .lan tem seu próprio Certificate (mesmo padrão headlamp/argocd).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ceph-dashboard
+  namespace: ceph-dashboard
+spec:
+  secretName: ceph-dashboard-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: ceph.lan
+  dnsNames:
+    - ceph.lan

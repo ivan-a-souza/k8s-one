@@ -1,0 +1,9 @@
+# Headlamp — dashboard do Kubernetes (in-cluster, basic auth no ingress)
+# Acesso: https://headlamp.naesquina.com.br (login via token do SA headlamp-admin)
+# Basic auth (HAProxy): secret 'headlamp-basic-auth' gerado por kustomize
+# (manifests/apps/secrets/headlamp.env — gitignored).
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ops

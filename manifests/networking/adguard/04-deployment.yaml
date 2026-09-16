@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adguard
+  namespace: networking
+  labels:
+    app: adguard
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: adguard
+  template:
+    metadata:
+      labels:
+        app: adguard
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: adguard
+          image: adguard/adguardhome:v0.107.79
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TZ
+              value: America/Sao_Paulo
+          ports:
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+            - name: web
+              containerPort: 80
+              protocol: TCP
+            - name: setup
+              containerPort: 3000
+              protocol: TCP
+          volumeMounts:
+            - name: conf
+              mountPath: /opt/adguardhome/conf
+            - name: work
+              mountPath: /opt/adguardhome/work
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: 53
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pidof AdGuardHome >/dev/null 2>&1
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: conf
+          persistentVolumeClaim:
+            claimName: adguard-conf-fs
+        - name: work
+          persistentVolumeClaim:
+            claimName: adguard-work-fs

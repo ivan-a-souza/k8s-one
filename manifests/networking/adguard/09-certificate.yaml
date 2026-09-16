@@ -2,7 +2,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: dns-lan
-  namespace: infra
+  namespace: networking
 spec:
   secretName: dns-lan-tls
   issuerRef:
