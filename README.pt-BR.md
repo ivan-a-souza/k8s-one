@@ -291,7 +291,7 @@ os pods recebam um orçamento realista e o host fique protegido.
 | `systemReserved` | `750m` / `12Gi` | Reservado para o host (sessão do desktop, daemons) |
 | `kubeReserved` | `250m` / `2Gi` | Reservado para control plane + runtime (etcd, apiserver, kubelet, containerd) |
 | `evictionHard` | `memory.available: 1Gi` | Kubelet começa a evictar pods abaixo disso |
-| `enforceNodeAllocatable` | `[pods]` | Trava o cgroup `kubepods` em `memory.max`/`cpu.max` = allocatable |
+| `enforceNodeAllocatable` | `[pods]` | Faz o kubelet escrever as reservas no cgroup `kubepods` (veja abaixo o que de fato vai parar lá) |
 
 Num host de 4 CPU / 23,2 GiB isso resulta em:
 
@@ -300,18 +300,25 @@ capacidade        4 cpu      24346668Ki (23,2 GiB)
  - kubeReserved    250m        2 GiB
  - systemReserved  750m       12 GiB
  - evictionHard      --        1 GiB
- = allocatable     3 cpu      ~8,2 GiB   <- tudo que os pods podem usar
+ = allocatable     3 cpu      ~8,2 GiB   <- o orçamento de scheduling
 ```
 
-Duas consequências que vale internalizar:
+Três consequências que vale internalizar:
 
 - **O `kubectl top nodes` reporta mais de 100% de memória.** O `/proc/meminfo` não é
   namespaced, então o kubelet lê o uso do *host* enquanto o denominador é os 8,2 GiB
-  alocáveis. Um valor de `207%` não é vazamento — é o desktop inteiro.
-- **O único teto real do cluster é o cgroup `kubepods`.** O driver é `cgroupfs`, então
-  o caminho é `/sys/fs/cgroup/kubepods` (sem `.slice`). O container em si é ilimitado
-  (`Memory: 0`), e os processos do control plane rodam *fora* do `kubepods`, cobertos
-  apenas pela *reserva* de `systemReserved` — não por um limite imposto.
+  alocáveis. Um valor como `207%` não é vazamento — é o desktop inteiro.
+- **A memória tem exatamente um teto real, e ele é ~9,2 GiB — não os 8,2 GiB alocáveis.**
+  O `enforceNodeAllocatable` faz o kubelet setar `memory.max` no cgroup `kubepods` como
+  *capacidade − reservas* (`9898602496` = 9440 MiB), e os 8,2 GiB do scheduler são esse
+  valor menos a margem de eviction de 1 GiB. O driver é `cgroupfs`, então o caminho é
+  `/sys/fs/cgroup/kubepods` (sem `.slice`). O container em si é ilimitado (`Memory: 0`),
+  e os processos do control plane rodam *fora* do `kubepods`, cobertos apenas pela
+  *reserva* de `systemReserved` — não por um limite imposto.
+- **A CPU não tem teto em camada nenhuma.** O `cpu.max` está sem quota (`max 100000`)
+  tanto no container quanto no `kubepods`, então os pods podem estourar os 3 cores
+  alocáveis sempre que o host tiver ciclos ociosos. Só o *scheduling* é limitado a
+  3 cores — o consumo, não.
 
 **Os requests são o orçamento de scheduling.** São eles que travam rollouts: quando
 se aproximam do allocatable, o pod de substituição do `maxSurge` não consegue ser
@@ -908,16 +915,46 @@ Sintoma nos eventos do pod: `rbd image ... is still being used` ou `rbd-nbd: coo
 Causa: o StorageClass `ceph-block` usa `mounter: rbd-nbd`; mapeamentos `rbd-nbd` podem
 sobreviver à recriação de pods/plugin e o healer do cephcsi não consegue reaproveitá-los.
 
-Recuperação manual (no host):
+**As ferramentas do repositório não cobrem esse caso de forma confiável.** Tanto o
+`fix-rbd-stale.sh` quanto o `rbd-nbd-reaper.sh` decidem que um mapeamento é órfão
+procurando um `volumeHandle` sem `VolumeAttachment` em `Attached=true`. Mas o
+`VolumeAttachment` tem escopo de nó: ele sobrevive à substituição do pod que usava o
+volume, permanecendo `Attached=true` por um volume que nenhum pod vivo está usando.
+Reproduzir essa heurística contra o estado ao vivo durante um rollout afetado reporta
+**zero órfãos**, com os mapeamentos obsoletos ali na frente. Não use `--all` como
+contorno — ele desmapeia todos os dispositivos, inclusive os que servem pods rodando
+(Prometheus, Grafana, authentik-postgresql).
+
+O teste definitivo é se o dispositivo está **de fato montado**:
 
 ```bash
-scripts/fix-rbd-stale.sh            # dry-run: mostra o que faria
-scripts/fix-rbd-stale.sh --apply    # desmapeia os órfãos (--all p/ todos)
+# dispositivo -> volumeHandle, e quantas vezes está montado (0 = órfão)
+for d in /sys/block/nbd[0-9]*; do
+  b=$(cat "$d/backend" 2>/dev/null); [ -z "$b" ] && continue
+  n=$(basename "$d")
+  echo "$n ${b##*-} mounts=$(docker exec k8s-one grep -c "/dev/$n " /proc/mounts)"
+done
+
+# a qual PV cada volumeHandle pertence
+kubectl get pv -o go-template='{{range .items}}{{if .spec.csi}}{{.spec.csi.volumeHandle}} {{.metadata.name}}{{"\n"}}{{end}}{{end}}'
 ```
 
-No boot, o `rbd-nbd-reaper.sh` roda automaticamente: desmapeia mapeamentos cujo
-`volumeHandle` não tem `VolumeAttachment` em `Attached=true` para o nó. É **dry-run por
-padrão**; ative com `RBD_REAPER_DRY_RUN=0` no `.env` (requer rebuild/recreate).
+A numeração dos `nbd` não é cronológica e não significa nada — nunca deduza staleness
+pelo número do dispositivo. Desmapeie apenas os que mostrarem `mounts=0`:
+
+```bash
+PLUGIN=rook-ceph.rbd.csi.ceph.com-nodeplugin-<hash>
+kubectl -n rook-ceph exec $PLUGIN -c csi-rbdplugin -- rbd-nbd unmap /dev/nbdN
+```
+
+Isso apenas desanexa o block device — a imagem RBD e seu conteúdo não são tocados, e o
+pod que aguardava assume o volume em segundos.
+
+> O `rbd-nbd-reaper.sh` roda no boot e está **habilitado** nesta instalação
+> (`RBD_REAPER_DRY_RUN=0` no `.env`). Ele compartilha a heurística de
+> `VolumeAttachment` descrita acima, então trate-o como rede de segurança para sobras,
+> não como cobertura para este modo de falha. O `fix-rbd-stale.sh` continua útil para o
+> caso que a heurística dele de fato atende.
 
 ### Container/Docker travado no rebuild (`did not receive an exit event`)
 
