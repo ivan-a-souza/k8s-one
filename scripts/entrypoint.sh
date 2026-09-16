@@ -342,9 +342,12 @@ failSwapOn: false
 # Limites "nativos" do k8s-one (protege o host 23Gi/4cpu):
 #  - capacidade reportada = memoria do HOST -> reservas grandes "mentem" pro
 #    scheduler (allocatable = 23.2Gi - 12Gi - 2Gi - 1Gi = ~8.2Gi mem / 3 cpu).
-#  - enforceNodeAllocatable: [pods] faz o kubelet travar o cgroup kubepods em
-#    memory.max/cpu.max = allocatable (limite real de kernel p/ todos os pods).
-#    Driver e cgroupfs, entao o path e /sys/fs/cgroup/kubepods (sem .slice).
+#  - enforceNodeAllocatable: [pods] faz o kubelet escrever as reservas no cgroup
+#    kubepods, que vira o teto real de memoria dos pods: memory.max =
+#    capacidade - reservas (9440Mi) = allocatable + a margem de eviction de 1Gi.
+#    CPU nao ganha quota (cpu.max = max), entao pods podem estourar os 3 cores
+#    se o host estiver ocioso. Driver e cgroupfs, entao o path e
+#    /sys/fs/cgroup/kubepods (sem .slice).
 #  - evictionHard protege o host quando a memoria disponivel cai.
 enforceNodeAllocatable:
   - pods
