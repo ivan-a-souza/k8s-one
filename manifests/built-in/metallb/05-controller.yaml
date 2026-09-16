@@ -35,6 +35,11 @@ spec:
         - name: METALLB_DEPLOYMENT
           value: controller
         image: quay.io/metallb/controller:v0.16.1
+        resources:
+          requests:
+            memory: 32Mi
+          limits:
+            memory: 256Mi
         livenessProbe:
           failureThreshold: 3
           httpGet:

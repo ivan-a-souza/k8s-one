@@ -30,6 +30,11 @@ spec:
             existingSecret: authentik-postgresql-auth
             database: authentik
           primary:
+            resources:
+              requests:
+                memory: 128Mi
+              limits:
+                memory: 512Mi
             persistence:
               enabled: true
               storageClass: ceph-block
