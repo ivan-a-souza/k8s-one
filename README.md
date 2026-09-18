@@ -361,6 +361,8 @@ Formats:
 - `*.env` → created with `kubectl create secret generic --from-env-file` (e.g. `authentik.env`).
 - `*.yaml` → a `kind: Secret` manifest (with `stringData`) applied with `kubectl apply -f`.
 
+> **One credential, two secrets.** `authentik-config` also carries the OIDC client credentials that LiteLLM authenticates with (`LITELLM_OIDC_CLIENT_ID` / `LITELLM_OIDC_CLIENT_SECRET`) — they must be the **same values** as `GENERIC_CLIENT_ID` / `GENERIC_CLIENT_SECRET` in `litellm-env`. Whoever registers the client (the blueprint) and whoever presents it (the proxy) are different apps, so the pair has to exist on both sides: rotate one, rotate both.
+
 ### Create/update
 
 ```bash
@@ -647,8 +649,9 @@ k8s-one/
     ├── argocd/                          # Applications (Argo CD) — Helm charts
     │   ├── authentik/
     │   │   ├── 02-application.yaml      # existingSecret: authentik-config / authentik-postgresql-auth
+    │   │   ├── 03-blueprint.yaml        # OIDC provider/group/app (kubectl apply — never through Helm)
     │   │   └── secrets/                 # GITIGNORED (never commit)
-    │   │       ├── authentik.env        # app env (AUTHENTIK_*)
+    │   │       ├── authentik.env        # app env (AUTHENTIK_* + LITELLM_OIDC_*)
     │   │       └── postgresql-auth.yaml # PostgreSQL auth (postgres-password/password)
     │   ├── litellm/
     │   │   ├── 01-repo-secret.yaml      # OCI repo (ghcr.io/berriai, enableOCI)
@@ -756,6 +759,11 @@ Cilium is installed via the Cilium CLI, which manages the Helm chart and provide
 - **ClusterIP**: `10.96.0.10`
 - **Forward**: `8.8.8.8`, `1.1.1.1` (Google DNS, Cloudflare)
 - **Domain**: `cluster.local`
+- **`.lan` names**: resolved in-cluster by a `hosts` block pointing at the MetalLB VIP (`192.168.1.200`)
+
+The `hosts` block is needed because the `forward` above goes straight to public resolvers, which do not know `.lan` (a private TLD only AdGuard serves) — without it no pod reaches `authentik.lan`, `grafana.lan` etc. **by name**, only by ClusterIP. The IP is the **MetalLB VIP** (the `haproxy-kubernetes-ingress` LoadBalancer service), **not** the `192.168.1.20` used by the AdGuard rewrites: `.20` is the host's LAN IP and is unreachable from inside the cluster (it times out). The VIP is reachable, and routes by Host header with the mkcert certs.
+
+It is an explicit list, not a wildcard: the `hosts` plugin only gained wildcard support on CoreDNS **`master`** — no release has it (this cluster runs v1.12.0), so `*.lan` there would be stored as a literal name and silently never match. The `template` alternative would work but makes *every* `*.lan` answer the VIP, including `router.lan` (AdGuard points that at `192.168.1.1`), with no way to carve an exception (Go/RE2 has no lookahead). A new `.lan` service is one more word on that line, in `manifests/built-in/coredns/04-configmap.yaml`. The `reload` plugin picks the change up in ~30 s, no restart.
 
 ### Local DNS (AdGuard) & Internal Certificates
 
@@ -823,6 +831,34 @@ docker exec k8s-one kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph
 
 Manifests: `manifests/built-in/ceph/` (`06-dashboard-namespace.yaml`, `07-dashboard-service.yaml`, `08-dashboard-ingress.yaml`, `09-dashboard-certificate.yaml`), applied at boot by `entrypoint.sh`.
 
+### Authentik (`authentik.lan`)
+
+Identity provider at `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, embedded bitnami PostgreSQL — not the cluster's YugabyteDB, because Django migrations need a real PG — mkcert cert `authentik-tls`). It is here to be the **single login** for the cluster's apps; the only app wired to it so far is LiteLLM.
+
+Groups, providers and applications are **declarative**, via a blueprint the chart mounts into the worker:
+
+```bash
+kubectl apply -f manifests/argocd/authentik/03-blueprint.yaml    # the blueprint ConfigMap
+kubectl apply -f manifests/argocd/authentik/02-application.yaml  # then let Argo CD sync the chart
+```
+
+- `manifests/argocd/authentik/03-blueprint.yaml` is a ConfigMap holding the blueprint (`litellm-oidc.yaml`): group `litellm-users`, OAuth2 provider `LiteLLM`, the application and the group binding.
+- It is applied with **`kubectl`, never through Helm**: blueprint tags (`!Find`, `!KeyOf`, `!Env`) are custom YAML, and Helm's `values → toYaml` round-trip destroys them (they arrive in the cluster as bare strings and the blueprint fails).
+- The chart mounts every name in `blueprints.configMaps` (in `02-application.yaml`) into the **worker** at `/blueprints/mounted/cm-<name>`; the worker discovers all `*.yaml` there.
+- **Discovery is event-driven, not boot-time.** What triggers it is the file watcher (`on_created`/`on_modified`) plus an **hourly** scheduled run. A ConfigMap that is already populated when the worker starts fires nothing — the mount happens before the process is up. To force it without waiting: touch the ConfigMap (`kubectl annotate cm authentik-blueprints k8s-one/reload="$(date -Iseconds)" --overwrite`) and the kubelet resync produces the create events.
+- **Idempotency comes from `identifiers`**, not from `id`: the importer builds a `filter()` from `identifiers` and, if it finds the object, updates it (`partial=True`); otherwise it creates. The entry `id` exists only so other entries can point at it with `!KeyOf`. An entry without `identifiers` aborts with "No or invalid identifiers".
+- **List-valued fields have an empty default and must be declared.** `grant_types` is `ArrayField(..., default=list)` on the model: the UI wizard fills it in, a blueprint does not. Omit it and the provider is created with `grant_types = {}` — it then rejects every grant (`Invalid grant_type for provider` in the server log) and `/authorize` answers `invalid_request`, which looks like a completely unrelated bug. Same trap for any other `ArrayField` (`property_mappings` above is the same shape, with a less obvious symptom: a token without the `email` claim).
+- **The client credentials are `!Env`**, resolved against the worker's environment — which receives **every key** of the `authentik-config` Secret (`envFrom`). They live in `secrets/authentik.env` (gitignored). Note `!Env` returns `None` for a missing variable instead of failing loudly, so the salt is on the other side: the authentik serializer rejects a null `client_secret`, and the sync errors out.
+
+Admin login is `akadmin`:
+
+```bash
+kubectl -n platform get secret authentik-config -o jsonpath='{.data.AUTHENTIK_BOOTSTRAP_EMAIL}' | base64 -d; echo
+kubectl -n platform get secret authentik-config -o jsonpath='{.data.AUTHENTIK_BOOTSTRAP_PASSWORD}' | base64 -d; echo
+```
+
+> The password above is the **bootstrap** value: it is consumed when the database is created. Editing it in `secrets/authentik.env` afterwards does **not** change the password of an existing `akadmin` — that is done in the UI (`Settings → Password`) or by resetting the flow.
+
 ### LiteLLM (`litellm.lan`)
 
 OpenAI-compatible proxy at `https://litellm.lan` (Ingress ns `platform` → `litellm:4000`, dedicated mkcert cert `litellm-tls`). It replaces the LiteLLM that used to run in the `infra/` docker-compose stack; the database is **the cluster's own YugabyteDB** (ns `data`, YSQL `:5433`) — which is why that DB exists here in the first place.
@@ -830,11 +866,21 @@ OpenAI-compatible proxy at `https://litellm.lan` (Ingress ns `platform` → `lit
 **DNS:** `litellm.lan` must be added as a rewrite in AdGuard (`Filters → DNS rewrites` → `192.168.1.20`), like the other `.lan` names. AdGuard rewrites are **per host, not wildcards**, and the config lives inside the `adguard-conf-fs` PVC (not in this repo), so this is a manual one-time step.
 
 ```bash
-# master key (also the API bearer token)
+# master key — the API bearer token (NOT a UI login, see below)
 kubectl -n platform get secret litellm-masterkey -o jsonpath='{.data.masterkey}' | base64 -d
 # list models
 curl -sk https://litellm.lan/v1/models -H "Authorization: Bearer $MASTER_KEY"
 ```
+
+**UI login is SSO through Authentik** (provider `LiteLLM`, see the Authentik section above). Redirect URI: `https://litellm.lan/sso/callback`; access is restricted to the `litellm-users` group. The whole switch is environment:
+
+- The keys are `GENERIC_*`, **not** `GOOGLE_*`. LiteLLM picks the provider in a **Google → Microsoft → Generic** `if/elif`, so while `GOOGLE_CLIENT_ID` exists the generic block is dead code — removing the two Google keys is what actually flips the provider.
+- Three endpoints are configured by hand (`authorize`, `token`, `userinfo`): LiteLLM does **not** use OIDC discovery, so there is no `/.well-known` lookup.
+- `PROXY_BASE_URL` (`https://litellm.lan`) is what composes the redirect URI; it must match what is registered on the provider.
+- The **master key is unaffected by SSO** — it stays the API bearer token. It is not a UI password: `POST /login` with `admin` + master key returns 401 here.
+- Without a `LITELLM_LICENSE`, SSO is capped at **5 users** (`ui_sso.py` refuses beyond that). The `LiteLLM_UserTable` starts empty, so it only matters if more people ever log in.
+
+**TLS when calling Authentik.** The pod reaches Authentik at `https://authentik.lan`, which inside the cluster resolves to the MetalLB VIP and serves a **mkcert** certificate — not trusted by the Debian CA bundle in the image, so the token exchange would fail hostname/issuer verification. The deployment therefore mounts the mkcert root (the `ca.crt` of the `litellm-tls` secret, already in the `platform` namespace) and an initContainer **concatenates** it with the system bundle, pointing `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` at the result. Concatenating rather than replacing matters: the proxy also calls `api.openai.com`, whose cert is not mkcert-signed.
 
 Deployment details worth knowing before touching it:
 - **Chart**: official `litellm-helm`, pulled as an **OCI** chart from `ghcr.io/berriai` (the classic Helm index `berriai.github.io/litellm-helm` is 404). The repo Secret's `url` is the **parent** of the chart in the OCI path — Argo CD builds `oci://<url>/<chart>`, so `url: ghcr.io/berriai` + `chart: litellm-helm`. `targetRevision` must be an exact tag (OCI has no semver ranges).

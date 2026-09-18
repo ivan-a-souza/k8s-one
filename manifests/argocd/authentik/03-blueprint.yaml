@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-blueprints
+  namespace: platform
+data:
+  # Blueprint do provider OIDC que a UI do LiteLLM usa para autenticar.
+  #
+  # Por que este arquivo e aplicado por `kubectl` e NAO pelo Helm (nao esta em
+  # `additionalObjects` do 02-application.yaml): as tags `!Find`, `!KeyOf` e
+  # `!Env` do blueprint sao YAML customizado, e o caminho values -> toYaml do
+  # Helm faz parse e re-serializacao — as tags chegam no cluster destruidas
+  # (viram string solta) e o blueprint falha. Como string num ConfigMap, elas
+  # passam intactas.
+  #
+  # O chart do authentik monta os ConfigMaps listados em `blueprints.configMaps`
+  # dentro do WORKER (templates/worker/deployment.yaml, em
+  # /blueprints/mounted/cm-<nome>); o worker descobre todo *.yaml de la e aplica.
+  # A referencia esta no 02-application.yaml.
+  #
+  # Idempotencia: quem manda e o campo `identifiers` de cada entry — o importer
+  # monta um filter() com ele; se achar, atualiza (partial=True), se nao, cria.
+  # O `id` serve so para o `!KeyOf` de outras entries. Sem `identifiers` o
+  # blueprint aborta com "No or invalid identifiers".
+  #
+  # Segredos: o `!Env` le variavel de ambiente do worker, que recebe TODAS as
+  # chaves do Secret `authentik-config` via envFrom. As duas chaves
+  # LITELLM_OIDC_* ficam em secrets/authentik.env (gitignored) e precisam ter os
+  # MESMOS valores que GENERIC_CLIENT_ID/GENERIC_CLIENT_SECRET no
+  # secrets/litellm.env — sao o mesmo par de credenciais, visto dos dois lados.
+  litellm-oidc.yaml: |
+    version: 1
+    metadata:
+      name: litellm-oidc
+      labels:
+        blueprints.goauthentik.io/description: Provider OIDC da UI do LiteLLM (k8s-one)
+    # Descoberta: o worker roda o discovery de hora em hora (ScheduleSpec com
+    # send_on_startup=True, que tambem dispara no boot do worker) e mantem um
+    # watcher de arquivos. O watcher depende de evento de criacao/modificacao —
+    # e o volume de ConfigMap so e re-sincronizado quando os DADOS mudam:
+    # `kubectl annotate` (metadata) nao gera evento nenhum.
+    entries:
+      # Grupo que controla quem entra. Nao existe binding nenhum na Application
+      # alem do abaixo, entao o acesso e exatamente a lista deste grupo.
+      - model: authentik_core.group
+        id: litellm-group
+        identifiers:
+          name: litellm-users
+        attrs:
+          name: litellm-users
+          users:
+            - !Find [authentik_core.user, [username, akadmin]]
+
+      - model: authentik_providers_oauth2.oauth2provider
+        id: litellm-provider
+        identifiers:
+          # `name` mora em authentik_core_provider (heranca multi-tabela), mas o
+          # Django filtra pelo pai normalmente.
+          name: LiteLLM
+        attrs:
+          name: LiteLLM
+          # Fluxo de autorizacao com consentimento implicito: o usuario ve
+          # "voce esta entrando no LiteLLM" e segue, sem tela de consentimento.
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+          client_type: confidential
+          # OBRIGATORIO declarar: o modelo do authentik tem
+          # `grant_types = ArrayField(..., default=list)` — lista VAZIA. O wizard
+          # da UI preenche sozinho, entao isso passa despercebido; um blueprint
+          # que omite cria um provider que recusa todo grant ("Invalid grant_type
+          # for provider" no log, e o /authorize devolve invalid_request).
+          grant_types:
+            - authorization_code
+            - refresh_token
+          # Sem default: se a env var faltar, o `!Env` devolve None e o
+          # serializer do authentik recusa — falha alta em vez de provider com
+          # segredo vazio.
+          client_id: !Env LITELLM_OIDC_CLIENT_ID
+          client_secret: !Env LITELLM_OIDC_CLIENT_SECRET
+          signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+          sub_mode: hashed_user_id
+          include_claims_in_id_token: true
+          redirect_uris:
+            # O default do LiteLLM e {PROXY_BASE_URL}/sso/callback, e o
+            # PROXY_BASE_URL dele e https://litellm.lan.
+            - matching_mode: strict
+              url: https://litellm.lan/sso/callback
+            # Rota de debug do LiteLLM: mostra os campos do JWT sem completar o
+            # login. Custa nada e evita ter que mexer no provider pra depurar.
+            - matching_mode: strict
+              url: https://litellm.lan/sso/debug/callback
+          # Os scope mappings TEM que ser declarados: se omitidos, o provider
+          # nasce sem escopo nenhum e o token volta sem `email` — o LiteLLM nao
+          # teria com que identificar o usuario. Os tres `managed` abaixo foram
+          # conferidos no banco desta instancia.
+          property_mappings:
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-openid"]]
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-email"]]
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-profile"]]
+
+      - model: authentik_core.application
+        id: litellm-app
+        identifiers:
+          slug: litellm
+        attrs:
+          name: LiteLLM
+          slug: litellm
+          provider: !KeyOf litellm-provider
+          # Vira o link do tile no portal do authentik em /if/user/.
+          meta_launch_url: https://litellm.lan
+          meta_description: Proxy OpenAI-compativel do cluster
+          meta_publisher: k8s-one
+          policy_engine_mode: any
+
+      # Unico binding da Application. Sem ele qualquer usuario ativo entrar;
+      # com ele, so quem esta em litellm-users.
+      - model: authentik_policies.policybinding
+        id: litellm-app-binding
+        identifiers:
+          target: !KeyOf litellm-app
+          group: !KeyOf litellm-group
+        attrs:
+          target: !KeyOf litellm-app
+          group: !KeyOf litellm-group
+          order: 0
+          enabled: true

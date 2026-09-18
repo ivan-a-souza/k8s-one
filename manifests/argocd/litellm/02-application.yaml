@@ -161,6 +161,24 @@ spec:
             limits:
               cpu: "1"
               memory: 2Gi
+          # O template do job usa os MESMOS `.Values.volumes`,
+          # `.Values.volumeMounts` e `.Values.extraEnvVars` do Deployment, mas
+          # NAO o `.Values.extraInitContainers` (cada um tem o seu). Como o
+          # `extraEnvVars` do topo traz SSL_CERT_FILE apontando para o bundle,
+          # o job precisa do mesmo initContainer aqui — senao o container dele
+          # sobe apontando para um arquivo que nao existe.
+          extraInitContainers:
+            - name: ca-bundle
+              image: ghcr.io/berriai/litellm-database:1.89.2
+              command: ["sh", "-c"]
+              args:
+                - cat /etc/ssl/certs/ca-certificates.crt /mkcert/ca.crt > /certs/ca-bundle.crt
+              volumeMounts:
+                - name: mkcert-ca
+                  mountPath: /mkcert
+                  readOnly: true
+                - name: ca-bundle
+                  mountPath: /certs
 
         # Sem isto o stdout do Python fica bufferizado: como o OOMKill mata o
         # processo com SIGKILL, o buffer se perde e o `kubectl logs` volta VAZIO,
@@ -185,6 +203,59 @@ spec:
           PYTHONUNBUFFERED: "1"
           PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "true"
           ENFORCE_PRISMA_MIGRATION_CHECK: "true"
+
+        # --- TLS para falar com o authentik (SSO da UI) ---
+        #
+        # O proxy troca o `code` do OIDC chamando
+        # https://authentik.lan/application/o/token (e depois /userinfo). Esse
+        # nome resolve in-cluster para o VIP do MetalLB (bloco `hosts` do
+        # CoreDNS) e o certificado e do mkcert — que NAO esta no bundle de CAs
+        # do Debian que vem na imagem. Sem isto a troca de code morre com
+        # SSLCertVerificationError e o login volta pro /ui sem sessao.
+        #
+        # O bundle e CONCATENADO, nao substituido: o proxy tambem chama
+        # api.openai.com, cujo certificado nao e mkcert — apontar SSL_CERT_FILE
+        # so para o CA local quebraria todas as chamadas de modelo.
+        #
+        # A raiz do mkcert ja esta no ns platform: e o `ca.crt` do secret
+        # litellm-tls (emitido pelo ClusterIssuer local-ca), que todo secret
+        # tls do cert-manager carrega. Nao precisa criar secret novo.
+        volumes:
+          - name: mkcert-ca
+            secret:
+              secretName: litellm-tls
+              items:
+                - key: ca.crt
+                  path: ca.crt
+          # emptyDir porque o bundle e derivado na hora, pelo initContainer.
+          - name: ca-bundle
+            emptyDir: {}
+        extraInitContainers:
+          - name: ca-bundle
+            # Mesma imagem do proxy: nao ha o que instalar, so o `cat`.
+            image: ghcr.io/berriai/litellm-database:1.89.2
+            command: ["sh", "-c"]
+            args:
+              - cat /etc/ssl/certs/ca-certificates.crt /mkcert/ca.crt > /certs/ca-bundle.crt
+            volumeMounts:
+              - name: mkcert-ca
+                mountPath: /mkcert
+                readOnly: true
+              - name: ca-bundle
+                mountPath: /certs
+        volumeMounts:
+          - name: ca-bundle
+            mountPath: /certs
+            readOnly: true
+        # LISTA de env vars, nao mapa: no chart, `envVars` (o de cima, que o job
+        # de migrations usa) e um mapa chave-valor, mas `extraEnvVars` e
+        # renderizado com toYaml direto na lista de env do container. Mapa aqui
+        # quebra o render do Helm inteiro ("did not find expected '-' indicator").
+        extraEnvVars:
+          - name: SSL_CERT_FILE
+            value: /certs/ca-bundle.crt
+          - name: REQUESTS_CA_BUNDLE
+            value: /certs/ca-bundle.crt
 
         ingress:
           enabled: true

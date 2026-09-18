@@ -21,6 +21,13 @@ spec:
           enabled: true
           existingSecret:
             secretName: authentik-config
+        # ConfigMap com os blueprints (declarativo). O chart monta cada nome em
+        # /blueprints/mounted/cm-<nome> dentro do WORKER, que aplica todo *.yaml.
+        # O ConfigMap em si e criado por `kubectl apply -f 03-blueprint.yaml` e
+        # NAO pelo Helm — ver o comentario no topo daquele arquivo.
+        blueprints:
+          configMaps:
+            - authentik-blueprints
         postgresql:
           enabled: true
           auth:
