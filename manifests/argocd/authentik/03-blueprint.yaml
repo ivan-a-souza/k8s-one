@@ -40,6 +40,22 @@ data:
     # e o volume de ConfigMap so e re-sincronizado quando os DADOS mudam:
     # `kubectl annotate` (metadata) nao gera evento nenhum.
     entries:
+      # Mantem o e-mail do admin igual ao AUTHENTIK_BOOTSTRAP_EMAIL do Secret
+      # (gitignored): o bootstrap so vale quando o banco e criado, entao sem
+      # esta entry um e-mail corrigido depois ficaria divergente entre o Secret
+      # e o usuario — e o e-mail e o que o LiteLLM usa para provisionar o
+      # usuario dele no primeiro login.
+      #
+      # O valor vem por !Env em vez de literal para nao versionar e-mail
+      # pessoal num arquivo publico. O `partial=True` do importer garante que
+      # so o campo `email` e tocado neste usuario.
+      - model: authentik_core.user
+        id: akadmin-user
+        identifiers:
+          username: akadmin
+        attrs:
+          email: !Env AUTHENTIK_BOOTSTRAP_EMAIL
+
       # Grupo que controla quem entra. Nao existe binding nenhum na Application
       # alem do abaixo, entao o acesso e exatamente a lista deste grupo.
       - model: authentik_core.group
