@@ -41,5 +41,11 @@ apply_env_secret platform authentik-config manifests/argocd/authentik/secrets/au
 apply_yaml_secret manifests/argocd/authentik/secrets/postgresql-auth.yaml
 # kube-prometheus-stack — admin do Grafana (chaves admin-user / admin-password)
 apply_yaml_secret manifests/argocd/prometheus-stack/secrets/grafana-admin.yaml
+# litellm — env do proxy (OPENAI_API_KEY, LITELLM_SALT_KEY, PROXY_BASE_URL, OIDC)
+apply_env_secret platform litellm-env manifests/argocd/litellm/secrets/litellm.env
+# litellm — credenciais do YugabyteDB (chaves username / password)
+apply_yaml_secret manifests/argocd/litellm/secrets/litellm-db.yaml
+# litellm — master key do proxy (chave masterkey)
+apply_yaml_secret manifests/argocd/litellm/secrets/litellm-masterkey.yaml
 
 echo "OK: secrets aplicados."

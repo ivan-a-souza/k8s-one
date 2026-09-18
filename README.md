@@ -352,6 +352,9 @@ they never contain a password.
 | `authentik-config` | `platform` | `manifests/argocd/authentik/secrets/authentik.env` | `authentik.existingSecret` |
 | `authentik-postgresql-auth` | `platform` | `manifests/argocd/authentik/secrets/postgresql-auth.yaml` | `postgresql.auth.existingSecret` |
 | `grafana-admin` | `monitoring` | `manifests/argocd/prometheus-stack/secrets/grafana-admin.yaml` | `grafana.admin.existingSecret` |
+| `litellm-env` | `platform` | `manifests/argocd/litellm/secrets/litellm.env` | `litellm.environmentSecrets` |
+| `litellm-db` | `platform` | `manifests/argocd/litellm/secrets/litellm-db.yaml` | `litellm.db.secret` |
+| `litellm-masterkey` | `platform` | `manifests/argocd/litellm/secrets/litellm-masterkey.yaml` | `litellm.masterkeySecretName` |
 | `mkcert-ca` | `cert-manager` | `manifests/built-in/cert-manager/secrets/mkcert-ca.yaml` | root CA for ClusterIssuer `local-ca` |
 
 Formats:
@@ -647,6 +650,13 @@ k8s-one/
     │   │   └── secrets/                 # GITIGNORED (never commit)
     │   │       ├── authentik.env        # app env (AUTHENTIK_*)
     │   │       └── postgresql-auth.yaml # PostgreSQL auth (postgres-password/password)
+    │   ├── litellm/
+    │   │   ├── 01-repo-secret.yaml      # OCI repo (ghcr.io/berriai, enableOCI)
+    │   │   ├── 02-application.yaml      # litellm-helm chart + db-bootstrap hook (PreSync)
+    │   │   └── secrets/                 # GITIGNORED (never commit)
+    │   │       ├── litellm.env          # app env (OPENAI_API_KEY, PROXY_BASE_URL, OIDC...)
+    │   │       ├── litellm-db.yaml      # YugabyteDB creds (username/password)
+    │   │       └── litellm-masterkey.yaml # proxy master key (masterkey)
     │   ├── prometheus-stack/
     │   │   ├── 02-application.yaml      # existingSecret: grafana-admin
     │   │   └── secrets/
@@ -812,6 +822,30 @@ docker exec k8s-one kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph
 > **Note:** the **Orchestrator** tab shows "Orchestrator is not available: Module not found" — expected. The `rook` mgr module is disabled (crash workaround, see Known Issues).
 
 Manifests: `manifests/built-in/ceph/` (`06-dashboard-namespace.yaml`, `07-dashboard-service.yaml`, `08-dashboard-ingress.yaml`, `09-dashboard-certificate.yaml`), applied at boot by `entrypoint.sh`.
+
+### LiteLLM (`litellm.lan`)
+
+OpenAI-compatible proxy at `https://litellm.lan` (Ingress ns `platform` → `litellm:4000`, dedicated mkcert cert `litellm-tls`). It replaces the LiteLLM that used to run in the `infra/` docker-compose stack; the database is **the cluster's own YugabyteDB** (ns `data`, YSQL `:5433`) — which is why that DB exists here in the first place.
+
+**DNS:** `litellm.lan` must be added as a rewrite in AdGuard (`Filters → DNS rewrites` → `192.168.1.20`), like the other `.lan` names. AdGuard rewrites are **per host, not wildcards**, and the config lives inside the `adguard-conf-fs` PVC (not in this repo), so this is a manual one-time step.
+
+```bash
+# master key (also the API bearer token)
+kubectl -n platform get secret litellm-masterkey -o jsonpath='{.data.masterkey}' | base64 -d
+# list models
+curl -sk https://litellm.lan/v1/models -H "Authorization: Bearer $MASTER_KEY"
+```
+
+Deployment details worth knowing before touching it:
+- **Chart**: official `litellm-helm`, pulled as an **OCI** chart from `ghcr.io/berriai` (the classic Helm index `berriai.github.io/litellm-helm` is 404). The repo Secret's `url` is the **parent** of the chart in the OCI path — Argo CD builds `oci://<url>/<chart>`, so `url: ghcr.io/berriai` + `chart: litellm-helm`. `targetRevision` must be an exact tag (OCI has no semver ranges).
+- **No IngressClass in this cluster**: every Ingress routes via the `haproxy.org/ingress.class` annotation and has CLASS `<none>`. The chart's `ingress.className` is therefore set to `""` (its default, `nginx`, would render `ingressClassName: nginx` and break routing).
+- **Two PreSync hooks run before every sync.** `litellm-db-bootstrap` (wave `-1`, `postgres:17-alpine`) idempotently creates the `litellm` role/database/schema on the YugabyteDB; then the chart's own `litellm-migrations` job runs `prisma migrate deploy`. Both are safe to re-run.
+- **`PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK=true` is required.** YugabyteDB does not block on `pg_advisory_lock` the way Postgres does: once an attempt is killed by timeout while holding the lock, every later attempt dies in 10s with `P1002 ... postgres advisory lock`. Without the flag the first deploy stalls with ~88 of 127 migrations applied. Safe here because there is exactly one writer (the PreSync hook) and the proxy starts with `DISABLE_SCHEMA_UPDATE=true`.
+- **`ENFORCE_PRISMA_MIGRATION_CHECK=true` is required too.** Without it LiteLLM logs "migration failed but continuing startup" and **exits 0** — the Job shows as `Completed` against a half-migrated database. With it, a migration failure fails the hook and stops the sync.
+- **Memory**: 2Gi limit, not less. Both the migration job (~1.7Gi peak) and the proxy are OOMKilled at 1Gi. `strategy: Recreate` avoids two proxies during a rollout on this single, memory-tight node.
+- **Metrics need the callback**: `/metrics` only exists when `litellm_settings.callbacks: [prometheus]` is set — without it LiteLLM returns 404 and the Prometheus target stays DOWN (the ServiceMonitor itself works: the scrape does happen). With the callback on, the endpoint also demands the API key, hence `require_auth_for_metrics_endpoint: false` (it is a ClusterIP endpoint).
+
+Manifests: `manifests/argocd/litellm/`. Secrets: see the table above.
 
 ---
 

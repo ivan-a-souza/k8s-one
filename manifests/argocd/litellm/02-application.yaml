@@ -1,0 +1,346 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: litellm
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    # Chart oficial do LiteLLM, publicado SÓ como OCI no ghcr (o repo Helm
+    # clássico berriai.github.io/litellm-helm dá 404). A url é o pai do chart —
+    # ver o comentário em 01-repo-secret.yaml.
+    repoURL: ghcr.io/berriai
+    chart: litellm-helm
+    # Tag OCI = versão exata do chart. OCI não aceita range semver (^1.89,
+    # latest, vazio) — o repo-server do Argo CD rejeita.
+    targetRevision: "1.89.2"
+    helm:
+      releaseName: litellm
+      # O chart traz 3 Pods de helm test (templates/tests/*.yaml, todos com
+      # `helm.sh/hook: test`). O Argo CD já ignora hooks que não suporta, mas a
+      # doc avisa que o skip automático "não é totalmente congruente" com a flag
+      # — então declaramos explicitamente para esses Pods nunca serem criados.
+      skipTests: true
+      values: |
+        # LiteLLM 1.89.2 no k8s-one (namespace platform). Espelha o litellm que
+        # rodava no docker-compose do infra (ghcr.io/berriai/litellm:main-stable),
+        # agora GitOps. Banco = YugabyteDB do ns data (YSQL), preparado pelo
+        # hook litellm-db-bootstrap.
+        replicaCount: 1
+        numWorkers: 1
+
+        image:
+          repository: ghcr.io/berriai/litellm-database
+          # Explícito em vez de depender do appVersion do chart: um upgrade de
+          # chart não troca a imagem do proxy sem a gente querer.
+          tag: "1.89.2"
+          pullPolicy: IfNotPresent
+
+        # Recreate, não RollingUpdate: no nó único um rollout com maxSurge
+        # subiria 2 pods do LiteLLM ao mesmo tempo, e o host (container k8s-one
+        # dividindo 23Gi com o desktop) não tem folga de memória pra isso.
+        strategy:
+          type: Recreate
+
+        # Sem requests o pod fica BestEffort — primeiro candidato a eviction num
+        # nó apertado (74% de requests, 204% de overcommit nos limits).
+        # 1Gi NÃO basta: o proxy é OOMKilled (exit 137) poucos segundos depois de
+        # subir, carregando o pacote inteiro + o client do Prisma. O job de
+        # migrations, que faz menos, chegou a ~1,7Gi de pico.
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+
+        # Banco: YugabyteDB já existente no ns data (serviço headless, YSQL na
+        # 5433). É o mesmo banco que o compose usava, e é pra isso que o YB está
+        # no cluster (ver comentário em manifests/argocd/authentik/02-application.yaml).
+        db:
+          # Obrigatório: o default do chart é true, o que subiria um PostgreSQL
+          # bitnami embutido em vez de usar o YB.
+          deployStandalone: false
+          useExisting: true
+          # Sem porta aqui: a 5433 entra explícita no db.url abaixo (o default do
+          # chart é 5432, que é a porta errada para o YSQL).
+          endpoint: yb-tservers.data.svc.cluster.local
+          database: litellm
+          # Os $(VAR) são expandidos pelo KUBELET a partir das envs DATABASE_*
+          # que o próprio chart define ANTES desta, tanto no deployment quanto no
+          # job de migrations (ver templates/deployment.yaml e migrations-job.yaml).
+          #   ?schema=litellm  -> o Prisma escreveria em `public`, e no YB (base
+          #                       PG15) `public` não dá CREATE para não-dono.
+          url: postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST):5433/$(DATABASE_NAME)?schema=litellm
+          secret:
+            name: litellm-db
+            usernameKey: username
+            passwordKey: password
+
+        # Redis do chart desligado: o config atual não usa cache.
+        redis:
+          enabled: false
+
+        # Sem masterkeySecretName o chart gera uma master key ALEATÓRIA a cada
+        # render (randAlphaNum 18 em templates/secret-masterkey.yaml) -> a
+        # Application ficaria OutOfSync pra sempre e o selfHeal em loop.
+        # O Secret vem de scripts/create-secrets.sh (chave `masterkey`).
+        masterkeySecretName: litellm-masterkey
+        masterkeySecretKey: masterkey
+
+        # Env do proxy (OPENAI_API_KEY, LITELLM_SALT_KEY, PROXY_BASE_URL, SSO...)
+        # via envFrom do Secret gitignored criado por scripts/create-secrets.sh.
+        environmentSecrets:
+          - litellm-env
+
+        proxyConfigMap:
+          create: true
+        # Espelho do infra/litellm/config.yaml. A master key vem do
+        # PROXY_MASTER_KEY que o chart injeta a partir do masterkeySecretName;
+        # o DATABASE_URL é montado pelo próprio chart (db.url acima).
+        proxy_config:
+          model_list:
+            - model_name: gpt-4o-mini
+              litellm_params:
+                model: openai/gpt-4o-mini
+                api_key: os.environ/OPENAI_API_KEY
+          general_settings:
+            master_key: os.environ/PROXY_MASTER_KEY
+            database_url: os.environ/DATABASE_URL
+            store_model_in_db: true
+            store_prompts_in_spend_logs: true
+          router_settings:
+            num_retries: 2
+            timeout: 60
+          # O endpoint /metrics só existe se o callback `prometheus` estiver
+          # habilitado — sem ele o LiteLLM devolve 404 e o target do Prometheus
+          # fica DOWN (o ServiceMonitor em si funciona: o scrape acontece).
+          # E com o callback ligado o endpoint passa a exigir a API key por
+          # padrão (401), daí o require_auth... abaixo. O endpoint é ClusterIP,
+          # in-cluster, então liberar sem auth é o mesmo trade-off que os outros
+          # serviços do cluster já fazem.
+          litellm_settings:
+            callbacks:
+              - prometheus
+            require_auth_for_metrics_endpoint: false
+
+        logLevel: INFO
+
+        # Probes com folga de timeout: neste host os pods compartilham CPU/RAM
+        # com o desktop inteiro, e timeout curto vira falso "Unhealthy" em massa
+        # (foi o incidente de 16/09/2026).
+        livenessProbe:
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 6
+        readinessProbe:
+          periodSeconds: 20
+          timeoutSeconds: 10
+          failureThreshold: 6
+        startupProbe:
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 60
+
+        # Job de migrations do Prisma. Já vem como hook PreSync do Argo CD
+        # (argocd.argoproj.io/hook em templates/migrations-job.yaml), então roda
+        # antes do Deployment e o proxy sobe com DISABLE_SCHEMA_UPDATE=true.
+        migrationJob:
+          enabled: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 512Mi
+            # 512Mi (o que eu tinha posto) NÃO basta: o `prisma migrate deploy`
+            # do schema do LiteLLM foi OOMKilled (exit 137) nas 4 tentativas.
+            # O cgroup kubepods do nó tem ~9,3G de teto com ~5,7G em uso, então
+            # 2G de teto cabe — e é um job curto, não um residente.
+            limits:
+              cpu: "1"
+              memory: 2Gi
+
+        # Sem isto o stdout do Python fica bufferizado: como o OOMKill mata o
+        # processo com SIGKILL, o buffer se perde e o `kubectl logs` volta VAZIO,
+        # sem nenhuma pista do que aconteceu.
+        #
+        # PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: o `prisma migrate deploy` pega um
+        # pg_advisory_lock antes de migrar. O YugabyteDB não bloqueia como o
+        # Postgres: quando uma tentativa anterior é morta por timeout segurando o
+        # lock, as seguintes estouram em 10s com P1002
+        # ("Timed out trying to acquire a postgres advisory lock"). Foi
+        # exatamente o que travou o primeiro deploy — 88 de 127 migrations
+        # aplicadas e o resto bloqueado. Sem lock não há contenção possível: aqui
+        # só existe um escritor (o hook PreSync), e o proxy sobe com
+        # DISABLE_SCHEMA_UPDATE=true.
+        #
+        # ENFORCE_PRISMA_MIGRATION_CHECK: sem isto o LiteLLM loga "migration
+        # failed but continuing startup" e SAI COM 0 — o Job aparece como
+        # Completed com o banco pela metade. Com a flag, falha de migration
+        # falha o hook PreSync e o sync para, que é o comportamento que
+        # queremos num deploy GitOps.
+        envVars:
+          PYTHONUNBUFFERED: "1"
+          PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "true"
+          ENFORCE_PRISMA_MIGRATION_CHECK: "true"
+
+        ingress:
+          enabled: true
+          # O cluster NÃO tem IngressClass nenhuma (todos os ingresses ativos
+          # estão com CLASS <none> e roteiam pela annotation
+          # haproxy.org/ingress.class). O default do chart é "nginx", que
+          # renderizaria ingressClassName: nginx e quebraria o roteamento.
+          # Vazio = a chave nem é renderizada.
+          className: ""
+          annotations:
+            haproxy.org/ingress.class: haproxy
+            haproxy.org/ssl-cert-namespace: platform
+            haproxy.org/ssl-cert: litellm-tls
+            # O default do HAProxy ingress é timeout-server 50s: resposta de LLM
+            # não-streaming acima disso morre com 504.
+            haproxy.org/timeout-server: "600s"
+          hosts:
+            - host: litellm.lan
+              paths:
+                - path: /
+                  pathType: Prefix
+          tls:
+            - secretName: litellm-tls
+              hosts:
+                - litellm.lan
+
+        serviceMonitor:
+          enabled: true
+          # O Prometheus do cluster seleciona ServiceMonitor por
+          # matchLabels release=kube-prometheus-stack (namespaceSelector {}),
+          # então sem este label o target não é descoberto.
+          labels:
+            release: kube-prometheus-stack
+          interval: 30s
+          scrapeTimeout: 10s
+
+        # extraResources é renderizado com toYaml SEM tpl -> YAML 100% estático,
+        # sem {{ }}. Os dois objetos abaixo são hooks PreSync, e não recursos
+        # normais, porque os recursos normais só existem na fase Sync — depois
+        # do job de migrations do chart.
+        extraResources:
+          # Certificado próprio do litellm.lan. O wildcard *.lan é rejeitado por
+          # validadores (`.lan` é tratado como apex), então cada app .lan tem o
+          # seu — mesmo padrão de headlamp/argocd/ceph/authentik. ClusterIssuer
+          # local-ca = CA do mkcert.
+          - apiVersion: cert-manager.io/v1
+            kind: Certificate
+            metadata:
+              name: litellm-tls
+              namespace: platform
+            spec:
+              secretName: litellm-tls
+              issuerRef:
+                name: local-ca
+                kind: ClusterIssuer
+              commonName: litellm.lan
+              dnsNames:
+                - litellm.lan
+
+          # Bootstrap do banco no YugabyteDB (idempotente): cria a role, o
+          # database e o schema que o Prisma espera. O YB do cluster é uma
+          # instalação nova — nem a role nem o database `litellm` existem lá.
+          # Wave -1 para rodar ANTES do job de migrations do chart (wave 0).
+          - apiVersion: batch/v1
+            kind: Job
+            metadata:
+              name: litellm-db-bootstrap
+              namespace: platform
+              annotations:
+                argocd.argoproj.io/hook: PreSync
+                argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+                argocd.argoproj.io/sync-wave: "-1"
+            spec:
+              backoffLimit: 2
+              ttlSecondsAfterFinished: 300
+              template:
+                spec:
+                  restartPolicy: Never
+                  securityContext:
+                    runAsNonRoot: true
+                    # uid/gid do usuário postgres na imagem oficial.
+                    runAsUser: 70
+                    runAsGroup: 70
+                  containers:
+                    - name: bootstrap
+                      # Imagem pequena só pelo psql: o YSQL fala o protocolo do
+                      # Postgres, então o psql conecta normal no YB.
+                      image: postgres:17-alpine
+                      imagePullPolicy: IfNotPresent
+                      command: ["/bin/sh", "-c"]
+                      args:
+                        - |
+                          set -euo pipefail
+
+                          echo "bootstrap: alvo $PGHOST:$PGPORT db=$APP_DB role=$APP_USER"
+
+                          if psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM pg_roles WHERE rolname='$APP_USER'" | grep -q 1; then
+                            echo "bootstrap: role $APP_USER ja existe"
+                          else
+                            echo "bootstrap: criando role $APP_USER"
+                            psql -v ON_ERROR_STOP=1 -c "CREATE ROLE \"$APP_USER\" LOGIN PASSWORD '$APP_PASSWORD'"
+                          fi
+
+                          # CREATE DATABASE não roda em bloco de transação no
+                          # YSQL -> nada de BEGIN/COMMIT nem -1/--single-transaction
+                          # (o autocommit do psql resolve).
+                          if psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM pg_database WHERE datname='$APP_DB'" | grep -q 1; then
+                            echo "bootstrap: database $APP_DB ja existe"
+                          else
+                            echo "bootstrap: criando database $APP_DB"
+                            psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$APP_DB\" OWNER \"$APP_USER\""
+                          fi
+
+                          echo "bootstrap: schema litellm"
+                          psql -v ON_ERROR_STOP=1 -d "$APP_DB" -c "CREATE SCHEMA IF NOT EXISTS litellm AUTHORIZATION \"$APP_USER\""
+
+                          echo "bootstrap: OK"
+                      env:
+                        - name: PGHOST
+                          value: yb-tservers.data.svc.cluster.local
+                        - name: PGPORT
+                          value: "5433"
+                        # Conecta como o superuser do YB: a role nova ainda não
+                        # existe na primeira execução, e o ysql_hba.conf do YB
+                        # está em `trust` (sem senha).
+                        - name: PGUSER
+                          value: yugabyte
+                        - name: PGDATABASE
+                          value: yugabyte
+                        - name: PGSSLMODE
+                          value: disable
+                        - name: APP_DB
+                          value: litellm
+                        - name: APP_USER
+                          valueFrom:
+                            secretKeyRef:
+                              name: litellm-db
+                              key: username
+                        - name: APP_PASSWORD
+                          valueFrom:
+                            secretKeyRef:
+                              name: litellm-db
+                              key: password
+                      resources:
+                        requests:
+                          cpu: 10m
+                          memory: 32Mi
+                        limits:
+                          cpu: 250m
+                          memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
