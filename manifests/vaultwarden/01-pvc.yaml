@@ -1,0 +1,20 @@
+# Vaultwarden — dados (base SQLite + chave RSA + cache de ícones).
+# Migrado da infra Docker (~/Projects/infra/vaultwarden) em 22/09/2026.
+#
+# Prune=false: por padrão o Argo CD apagaria este PVC se ele saísse dos
+# manifestos (prune) ou se a Application fosse excluída. Num PVC com os dados
+# do cofre isso é inaceitável — o volume só sai por ação humana explícita.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vaultwarden-data
+  namespace: vaultwarden
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 1Gi

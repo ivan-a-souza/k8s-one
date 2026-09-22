@@ -1,0 +1,69 @@
+# Vaultwarden — Deployment.
+#
+# Mesmo serviço que rodava no docker-compose do infra (vaultwarden/server),
+# agora no cluster. A versão fica PINADA na mesma que estava em produção no
+# dia da migração (1.36.0) para não somar "mudança de versão" ao risco da
+# migração; upgrade é decisão separada, depois.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vaultwarden
+  namespace: vaultwarden
+  labels:
+    app: vaultwarden
+spec:
+  replicas: 1
+  # Recreate: o volume é ReadWriteOnce (SQLite). Num nó único, um RollingUpdate
+  # com maxSurge tentaria subir 2 pods disputando o mesmo PVC.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vaultwarden
+  template:
+    metadata:
+      labels:
+        app: vaultwarden
+    spec:
+      containers:
+        - name: vaultwarden
+          image: vaultwarden/server:1.36.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            # ADMIN_TOKEN, SIGNUPS_ALLOWED, DOMAIN, ROCKET_PORT.
+            # Fora do git: criado por scripts/create-secrets.sh (gitignored).
+            - secretRef:
+                name: vaultwarden-env
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: "500m"
+              memory: 256Mi
+          # /alive é barato (não toca banco); /health faz round-trip no DB.
+          readinessProbe:
+            httpGet:
+              path: /alive
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /alive
+              port: http
+            # Timeouts com folga: o nó compartilha CPU com o desktop inteiro
+            # (mesmo motivo dos probes do LiteLLM).
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: vaultwarden-data

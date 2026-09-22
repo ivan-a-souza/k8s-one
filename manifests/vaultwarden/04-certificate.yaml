@@ -1,0 +1,16 @@
+# Certificado do vault.lan, emitido pelo ClusterIssuer `local-ca` (a CA do
+# mkcert) — mesmo padrão de argocd/headlamp/ceph/authentik/litellm. Certificado
+# por host (o wildcard *.lan é rejeitado por validadores).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vaultwarden-tls
+  namespace: vaultwarden
+spec:
+  secretName: vaultwarden-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: vault.lan
+  dnsNames:
+    - vault.lan

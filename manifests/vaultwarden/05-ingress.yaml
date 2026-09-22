@@ -1,0 +1,32 @@
+# Ingress da UI do Vaultwarden em https://vault.lan
+#
+# O cluster não tem IngressClass (todos os ingresses ativos estão com CLASS
+# <none> e roteiam pela annotation haproxy.org/ingress.class) — vazio de
+# propósito, igual ao resto do repositório.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vaultwarden
+  namespace: vaultwarden
+  annotations:
+    haproxy.org/ingress.class: haproxy
+    haproxy.org/ssl-cert-namespace: vaultwarden
+    haproxy.org/ssl-cert: vaultwarden-tls
+    # Upload de anexo/exportação do cofre pode demorar: folga no timeout.
+    haproxy.org/timeout-server: "120s"
+spec:
+  tls:
+    - hosts:
+        - vault.lan
+      secretName: vaultwarden-tls
+  rules:
+    - host: vault.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vaultwarden
+                port:
+                  name: http

@@ -1,0 +1,32 @@
+# Argo CD Application do Vaultwarden.
+#
+# Fonte: o PRÓPRIO repo GitOps (k8s-one), caminho manifests/vaultwarden — que
+# tem um kustomization.yaml (o Argo CD detecta kustomize sozinho). Diferente dos
+# outros apps do cluster, que vêm de charts Helm de terceiros: o Vaultwarden não
+# tem chart oficial, e como os dados precisam ficar exatamente no PVC que a
+# gente controla, manifestos próprios são o caminho certo aqui.
+#
+# Segredo `vaultwarden-env` NÃO está no repo (gitignored) — criar antes com:
+#   scripts/create-secrets.sh
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vaultwarden
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ivan-a-souza/k8s-one.git
+    targetRevision: main
+    path: manifests/vaultwarden
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vaultwarden
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
