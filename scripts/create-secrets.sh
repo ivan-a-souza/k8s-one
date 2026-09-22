@@ -49,3 +49,4 @@ apply_yaml_secret manifests/argocd/litellm/secrets/litellm-db.yaml
 apply_yaml_secret manifests/argocd/litellm/secrets/litellm-masterkey.yaml
 
 echo "OK: secrets aplicados."
+apply_env_secret vaultwarden vaultwarden-env manifests/argocd/vaultwarden/secrets/vaultwarden.env

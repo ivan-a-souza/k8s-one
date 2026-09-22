@@ -33,7 +33,7 @@ data:
         # inclusive router.lan, que no AdGuard aponta para 192.168.1.1. Servico
         # .lan novo = uma palavra a mais nesta linha.
         hosts {
-            192.168.1.200 argocd.lan authentik.lan ceph.lan dns.lan grafana.lan headlamp.lan litellm.lan
+            192.168.1.200 argocd.lan authentik.lan ceph.lan dns.lan grafana.lan headlamp.lan litellm.lan vault.lan
             ttl 30
             no_reverse
             fallthrough
