@@ -26,8 +26,8 @@ spec:
       values: |
         # LiteLLM 1.89.2 no k8s-one (namespace platform). Espelha o litellm que
         # rodava no docker-compose do infra (ghcr.io/berriai/litellm:main-stable),
-        # agora GitOps. Banco = YugabyteDB do ns data (YSQL), preparado pelo
-        # hook litellm-db-bootstrap.
+        # agora GitOps. Banco = a instância PostgreSQL do ns data, preparada
+        # pelo init do manifests/postgres/ (role, banco e schema `litellm`).
         replicaCount: 1
         numWorkers: 1
 
@@ -57,24 +57,27 @@ spec:
             cpu: "1"
             memory: 2Gi
 
-        # Banco: YugabyteDB já existente no ns data (serviço headless, YSQL na
-        # 5433). É o mesmo banco que o compose usava, e é pra isso que o YB está
-        # no cluster (ver comentário em manifests/argocd/authentik/02-application.yaml).
+        # Banco: a instância PostgreSQL compartilhada do ns data
+        # (manifests/postgres/). A mesma instância serve o Authentik, em banco
+        # separado — um banco por aplicação, com roles distintas.
         db:
           # Obrigatório: o default do chart é true, o que subiria um PostgreSQL
-          # bitnami embutido em vez de usar o YB.
+          # embutido em vez de usar o do cluster.
           deployStandalone: false
           useExisting: true
-          # Sem porta aqui: a 5433 entra explícita no db.url abaixo (o default do
-          # chart é 5432, que é a porta errada para o YSQL).
-          endpoint: yb-tservers.data.svc.cluster.local
+          endpoint: postgres.data.svc.cluster.local
           database: litellm
           # Os $(VAR) são expandidos pelo KUBELET a partir das envs DATABASE_*
           # que o próprio chart define ANTES desta, tanto no deployment quanto no
           # job de migrations (ver templates/deployment.yaml e migrations-job.yaml).
-          #   ?schema=litellm  -> o Prisma escreveria em `public`, e no YB (base
-          #                       PG15) `public` não dá CREATE para não-dono.
-          url: postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST):5433/$(DATABASE_NAME)?schema=litellm
+          # A porta vai explícita na URL porque o chart 1.89.2 não tem db.port.
+          #   ?schema=litellm  -> o schema dedicado do Prisma, criado pelo init
+          #                       do PostgreSQL (manifests/postgres/03-configmap-initdb.yaml).
+          #                       `public` também funcionaria — no PG15+ ele
+          #                       pertence a pg_database_owner e o dono do banco
+          #                       cria lá — mas manter o schema dedicado deixa o
+          #                       corte numa variável só.
+          url: postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST):5432/$(DATABASE_NAME)?schema=litellm
           secret:
             name: litellm-db
             usernameKey: username
@@ -184,24 +187,21 @@ spec:
         # processo com SIGKILL, o buffer se perde e o `kubectl logs` volta VAZIO,
         # sem nenhuma pista do que aconteceu.
         #
-        # PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: o `prisma migrate deploy` pega um
-        # pg_advisory_lock antes de migrar. O YugabyteDB não bloqueia como o
-        # Postgres: quando uma tentativa anterior é morta por timeout segurando o
-        # lock, as seguintes estouram em 10s com P1002
-        # ("Timed out trying to acquire a postgres advisory lock"). Foi
-        # exatamente o que travou o primeiro deploy — 88 de 127 migrations
-        # aplicadas e o resto bloqueado. Sem lock não há contenção possível: aqui
-        # só existe um escritor (o hook PreSync), e o proxy sobe com
-        # DISABLE_SCHEMA_UPDATE=true.
-        #
         # ENFORCE_PRISMA_MIGRATION_CHECK: sem isto o LiteLLM loga "migration
         # failed but continuing startup" e SAI COM 0 — o Job aparece como
         # Completed com o banco pela metade. Com a flag, falha de migration
         # falha o hook PreSync e o sync para, que é o comportamento que
         # queremos num deploy GitOps.
+        #
+        # (O PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK que existia aqui foi embora
+        # junto com o YugabyteDB. Ele era um contorno para um defeito do YB:
+        # o YB não libera o `pg_advisory_lock` quando a sessão morre, então
+        # depois de uma tentativa morta por timeout todas as seguintes
+        # estouravam em 10s com P1002 e o deploy travou em 88/127 migrations.
+        # O PostgreSQL libera o lock no disconnect, então ele volta a ser a
+        # proteção contra duas migrações concorrentes.)
         envVars:
           PYTHONUNBUFFERED: "1"
-          PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK: "true"
           ENFORCE_PRISMA_MIGRATION_CHECK: "true"
 
         # --- TLS para falar com o authentik (SSO da UI) ---
@@ -293,9 +293,12 @@ spec:
           scrapeTimeout: 10s
 
         # extraResources é renderizado com toYaml SEM tpl -> YAML 100% estático,
-        # sem {{ }}. Os dois objetos abaixo são hooks PreSync, e não recursos
-        # normais, porque os recursos normais só existem na fase Sync — depois
-        # do job de migrations do chart.
+        # sem {{ }}. O objeto abaixo é um hook PreSync, e não um recurso
+        # normal, porque os recursos normais só existem na fase Sync — depois
+        # do job de migrations do chart. O hook `litellm-db-bootstrap` que
+        # existia aqui foi removido junto com o YugabyteDB: a role, o banco e
+        # o schema `litellm` agora nascem com a instância PostgreSQL
+        # (manifests/postgres/03-configmap-initdb.yaml).
         extraResources:
           # Certificado próprio do litellm.lan. O wildcard *.lan é rejeitado por
           # validadores (`.lan` é tratado como apex), então cada app .lan tem o
@@ -315,97 +318,6 @@ spec:
               dnsNames:
                 - litellm.lan
 
-          # Bootstrap do banco no YugabyteDB (idempotente): cria a role, o
-          # database e o schema que o Prisma espera. O YB do cluster é uma
-          # instalação nova — nem a role nem o database `litellm` existem lá.
-          # Wave -1 para rodar ANTES do job de migrations do chart (wave 0).
-          - apiVersion: batch/v1
-            kind: Job
-            metadata:
-              name: litellm-db-bootstrap
-              namespace: platform
-              annotations:
-                argocd.argoproj.io/hook: PreSync
-                argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-                argocd.argoproj.io/sync-wave: "-1"
-            spec:
-              backoffLimit: 2
-              ttlSecondsAfterFinished: 300
-              template:
-                spec:
-                  restartPolicy: Never
-                  securityContext:
-                    runAsNonRoot: true
-                    # uid/gid do usuário postgres na imagem oficial.
-                    runAsUser: 70
-                    runAsGroup: 70
-                  containers:
-                    - name: bootstrap
-                      # Imagem pequena só pelo psql: o YSQL fala o protocolo do
-                      # Postgres, então o psql conecta normal no YB.
-                      image: postgres:17-alpine
-                      imagePullPolicy: IfNotPresent
-                      command: ["/bin/sh", "-c"]
-                      args:
-                        - |
-                          set -euo pipefail
-
-                          echo "bootstrap: alvo $PGHOST:$PGPORT db=$APP_DB role=$APP_USER"
-
-                          if psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM pg_roles WHERE rolname='$APP_USER'" | grep -q 1; then
-                            echo "bootstrap: role $APP_USER ja existe"
-                          else
-                            echo "bootstrap: criando role $APP_USER"
-                            psql -v ON_ERROR_STOP=1 -c "CREATE ROLE \"$APP_USER\" LOGIN PASSWORD '$APP_PASSWORD'"
-                          fi
-
-                          # CREATE DATABASE não roda em bloco de transação no
-                          # YSQL -> nada de BEGIN/COMMIT nem -1/--single-transaction
-                          # (o autocommit do psql resolve).
-                          if psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM pg_database WHERE datname='$APP_DB'" | grep -q 1; then
-                            echo "bootstrap: database $APP_DB ja existe"
-                          else
-                            echo "bootstrap: criando database $APP_DB"
-                            psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"$APP_DB\" OWNER \"$APP_USER\""
-                          fi
-
-                          echo "bootstrap: schema litellm"
-                          psql -v ON_ERROR_STOP=1 -d "$APP_DB" -c "CREATE SCHEMA IF NOT EXISTS litellm AUTHORIZATION \"$APP_USER\""
-
-                          echo "bootstrap: OK"
-                      env:
-                        - name: PGHOST
-                          value: yb-tservers.data.svc.cluster.local
-                        - name: PGPORT
-                          value: "5433"
-                        # Conecta como o superuser do YB: a role nova ainda não
-                        # existe na primeira execução, e o ysql_hba.conf do YB
-                        # está em `trust` (sem senha).
-                        - name: PGUSER
-                          value: yugabyte
-                        - name: PGDATABASE
-                          value: yugabyte
-                        - name: PGSSLMODE
-                          value: disable
-                        - name: APP_DB
-                          value: litellm
-                        - name: APP_USER
-                          valueFrom:
-                            secretKeyRef:
-                              name: litellm-db
-                              key: username
-                        - name: APP_PASSWORD
-                          valueFrom:
-                            secretKeyRef:
-                              name: litellm-db
-                              key: password
-                      resources:
-                        requests:
-                          cpu: 10m
-                          memory: 32Mi
-                        limits:
-                          cpu: 250m
-                          memory: 256Mi
   destination:
     server: https://kubernetes.default.svc
     namespace: platform

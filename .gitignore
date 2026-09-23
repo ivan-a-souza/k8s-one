@@ -16,6 +16,7 @@ manifests/ops/*/secrets/
 manifests/data/*/secrets/
 manifests/platform/*/secrets/
 manifests/argocd/*/secrets/
+manifests/postgres/*/secrets/
 
 # Docker
 .env

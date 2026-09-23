@@ -1,0 +1,77 @@
+# Init do PostgreSQL 18: cria as roles e os bancos que as duas aplicações
+# esperam. Roda UMA vez, quando o PGDATA está vazio, como superusuário PELO
+# SOCKET LOCAL (é o default `trust` do initdb para `local`).
+#
+# É o papel que o hook PreSync `litellm-db-bootstrap` fazia no YugabyteDB — só
+# que lá ele conectava de fora como superusuário SEM SENHA, porque o
+# ysql_hba.conf do YB estava em `trust`. Aqui o superusuário nunca sai do pod:
+# as aplicações recebem só as credenciais das próprias roles.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-initdb
+  namespace: data
+data:
+  10-apps.sh: |
+    #!/bin/bash
+    # bash, não sh: `set -o pipefail` não existe no dash (o /bin/sh do Debian).
+    set -euo pipefail
+
+    SUPER="${POSTGRES_USER:-postgres}"
+
+    # -w (--no-password): o socket local é `trust`, mas se um dia não for, é
+    # melhor falhar na hora do que ficar pendurado num prompt.
+    psql_super() { psql -v ON_ERROR_STOP=1 -w --no-psqlrc --username "$SUPER" "$@"; }
+
+    create_role() { # $1=role  $2=senha
+      local role="$1" pw="$2"
+      if [ "$(psql_super -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='$role'")" = "1" ]; then
+        echo "initdb: role '$role' ja existe"
+      else
+        echo "initdb: criando role '$role'"
+        # NOSUPERUSER/NOCREATEDB/NOCREATEROLE = least privilege. A role é dona
+        # do próprio banco e do próprio schema, não da instância.
+        #
+        # ⚠️ A senha é escapada AQUI, do lado do shell, dobrando as aspas
+        # simples — que é o escape padrão de literal SQL.
+        #
+        # Nada de `:'pw'` com `-c`: o psql NÃO faz interpolação de variável em
+        # comando passado com `-c` (só quando lê de stdin). Ele manda o `:'pw'`
+        # literal e o servidor responde `syntax error at or near ":"` — foi
+        # exatamente esse erro que queimou o primeiro volume.
+        # E nada de heredoc: em bloco YAML a indentação vira ESPAÇO, e o `<<-`
+        # do bash só reconhece delimitador precedido de TAB, então o
+        # here-document nunca fecha.
+        local pw_sql=${pw//\'/\'\'}
+        psql_super -d postgres -c \
+          "CREATE ROLE \"$role\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '$pw_sql'"
+      fi
+    }
+
+    create_db() { # $1=banco  $2=dono
+      local db="$1" owner="$2"
+      if [ "$(psql_super -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$db'")" = "1" ]; then
+        echo "initdb: banco '$db' ja existe"
+      else
+        echo "initdb: criando banco '$db'"
+        # CREATE DATABASE nao roda em bloco de transacao -> comando proprio.
+        psql_super -d postgres -c "CREATE DATABASE \"$db\" OWNER \"$owner\""
+      fi
+    }
+
+    # As senhas vêm dos Secrets montados como arquivo pelos dois consumidores —
+    # a MESMA credencial que cada aplicação usa, vinda da mesma fonte
+    # (scripts/create-secrets.sh), para não existir uma segunda verdade.
+    create_role litellm   "$(cat /run/secrets/litellm-db/password)"
+    create_role authentik "$(cat /run/secrets/authentik-db/password)"
+
+    create_db litellm   litellm
+    create_db authentik authentik
+
+    # O schema dedicado do Prisma: o DATABASE_URL do LiteLLM traz
+    # `?schema=litellm`. No PostgreSQL (15+) isso nem seria necessário — o
+    # `public` pertence a pg_database_owner e o dono do banco cria lá — mas
+    # manter o schema dedicado deixa o corte numa variável só.
+    psql_super -d litellm -c "CREATE SCHEMA IF NOT EXISTS litellm AUTHORIZATION \"litellm\""
+
+    echo "initdb: OK"

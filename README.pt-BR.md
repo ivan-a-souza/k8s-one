@@ -324,8 +324,8 @@ Três consequências que vale internalizar:
 se aproximam do allocatable, o pod de substituição do `maxSurge` não consegue ser
 agendado e aparecem eventos `0/1 nodes are available: 1 Insufficient cpu`. O uso real
 aqui fica bem abaixo dos requests, então vale acompanhar essa razão — e lembrar que
-sidecars injetados por chart (ex.: o `ybCleanup` do Yugabyte) somam requests que não
-aparecem nos valores que você escreveu.
+um chart pode injetar sidecars próprios (proxies de service mesh, exporters, coletores
+de log) que somam requests no pod sem nunca aparecer nos valores que você escreveu.
 
 A config é escrita por `write_kubelet_config()` em `scripts/entrypoint.sh` para
 `/var/lib/kubelet/config.yaml`, que fica no bind mount `./data/kubelet` e portanto
@@ -350,16 +350,19 @@ os Secrets via `existingSecret` — nunca contêm senha.
 | Secret | Namespace | Arquivo-fonte (gitignored) | Usado por |
 |---|---|---|---|
 | `authentik-config` | `platform` | `manifests/argocd/authentik/secrets/authentik.env` | `authentik.existingSecret` |
-| `authentik-postgresql-auth` | `platform` | `manifests/argocd/authentik/secrets/postgresql-auth.yaml` | `postgresql.auth.existingSecret` |
+| `authentik-postgresql-auth` | `platform` + `data` | `manifests/argocd/authentik/secrets/postgresql-auth.yaml` | role `authentik` no PostgreSQL (script de init, `data`) |
 | `grafana-admin` | `monitoring` | `manifests/argocd/prometheus-stack/secrets/grafana-admin.yaml` | `grafana.admin.existingSecret` |
 | `litellm-env` | `platform` | `manifests/argocd/litellm/secrets/litellm.env` | `litellm.environmentSecrets` |
-| `litellm-db` | `platform` | `manifests/argocd/litellm/secrets/litellm-db.yaml` | `litellm.db.secret` |
+| `litellm-db` | `platform` + `data` | `manifests/argocd/litellm/secrets/litellm-db.yaml` | `litellm.db.secret` + init do PostgreSQL (`data`) |
 | `litellm-masterkey` | `platform` | `manifests/argocd/litellm/secrets/litellm-masterkey.yaml` | `litellm.masterkeySecretName` |
 | `mkcert-ca` | `cert-manager` | `manifests/built-in/cert-manager/secrets/mkcert-ca.yaml` | CA raiz do ClusterIssuer `local-ca` |
+| `postgres-superuser` | `data` | `manifests/argocd/postgres/secrets/postgres-superuser.yaml` | superusuário do PostgreSQL (`POSTGRES_PASSWORD`) |
 
 Formatos:
 - `*.env` → criado com `kubectl create secret generic --from-env-file` (ex.: `authentik.env`).
 - `*.yaml` → manifest `kind: Secret` (com `stringData`) aplicado com `kubectl apply -f`.
+
+> **Uma credencial, dois namespaces.** Secret é namespaced, e o banco vive em `data` enquanto os consumidores vivem em `platform` — por isso o `create-secrets.sh` aplica `litellm-db.yaml` e `postgresql-auth.yaml` nos **dois** namespaces (`apply_yaml_secret_in_ns`, que reescreve o campo `namespace:` do manifesto na hora). O arquivo-fonte continua sendo a verdade única: rotacione a senha num lugar só, nunca num namespace só.
 
 > **Uma credencial, dois secrets.** O `authentik-config` também carrega as credenciais OIDC com que o LiteLLM se autentica (`LITELLM_OIDC_CLIENT_ID` / `LITELLM_OIDC_CLIENT_SECRET`) — precisam ter os **mesmos valores** que `GENERIC_CLIENT_ID` / `GENERIC_CLIENT_SECRET` no `litellm-env`. Quem registra o client (o blueprint) e quem o apresenta (o proxy) são apps diferentes, então o par existe dos dois lados: rotacione um, rotacione os dois.
 
@@ -395,9 +398,9 @@ kubectl -n platform get secret authentik-postgresql-auth -o jsonpath='{.data}' |
 
 - **Nunca** commitar arquivos em `secrets/` nem embutir senha em `02-application.yaml`.
 - Trocar uma senha = editar o arquivo-fonte em `secrets/`, rodar o script e
-  reiniciar o workload. Para o PostgreSQL do authentik a senha é gravada no
-  banco na inicialização: além do Secret, rode `ALTER USER` no banco (ou
-  rotacione via `postgresql.passwordUpdateJob`).
+  reiniciar o workload. Para uma role de aplicação no PostgreSQL compartilhado a
+  senha é gravada no banco na inicialização: além do Secret, rode `ALTER USER` no
+  banco (o script de init só cria role que ainda não existe).
 - Confirme que nada está rastreado: `git check-ignore manifests/argocd/*/secrets/*`.
 
 ---
@@ -648,24 +651,32 @@ k8s-one/
     │           └── mkcert-ca.yaml      # CA raiz do mkcert (nunca commitar)
     ├── argocd/                          # Applications (Argo CD) — Helm charts
     │   ├── authentik/
-    │   │   ├── 02-application.yaml      # existingSecret: authentik-config / authentik-postgresql-auth
+    │   │   ├── 02-application.yaml      # existingSecret: authentik-config (banco: PostgreSQL compartilhado)
     │   │   ├── 03-blueprint.yaml        # provider/grupo/app OIDC (kubectl apply — nunca via Helm)
     │   │   └── secrets/                 # GITIGNORED (nunca commitar)
     │   │       ├── authentik.env        # env do app (AUTHENTIK_* + LITELLM_OIDC_*)
     │   │       └── postgresql-auth.yaml # auth do PostgreSQL (postgres-password/password)
     │   ├── litellm/
     │   │   ├── 01-repo-secret.yaml      # repo OCI (ghcr.io/berriai, enableOCI)
-    │   │   ├── 02-application.yaml      # chart litellm-helm + hook db-bootstrap (PreSync)
+    │   │   ├── 02-application.yaml      # chart litellm-helm + hook de migrations (PreSync)
     │   │   └── secrets/                 # GITIGNORED (nunca commitar)
     │   │       ├── litellm.env          # env do app (OPENAI_API_KEY, PROXY_BASE_URL, OIDC...)
-    │   │       ├── litellm-db.yaml      # credenciais do YugabyteDB (username/password)
+    │   │       ├── litellm-db.yaml      # credenciais do PostgreSQL (username/password)
     │   │       └── litellm-masterkey.yaml # master key do proxy (masterkey)
+    │   ├── postgres/
+    │   │   ├── 02-application.yaml      # source: este repo (path manifests/postgres)
+    │   │   └── secrets/                 # GITIGNORED (nunca commitar)
+    │   │       └── postgres-superuser.yaml # senha do superusuário (postgres-password)
     │   ├── prometheus-stack/
     │   │   ├── 02-application.yaml      # existingSecret: grafana-admin
     │   │   └── secrets/
     │   │       └── grafana-admin.yaml   # admin do Grafana (admin-user/admin-password)
-    │   └── yugabyte/
-    │       └── 02-application.yaml
+    ├── postgres/                       # PostgreSQL 18 — instância compartilhada (manifestos próprios, deste repo)
+    │   ├── 01-pvc.yaml                 # PVC postgres-data (5Gi, ceph-block)
+    │   ├── 02-deployment.yaml          # postgres:18.6 (ns data)
+    │   ├── 03-configmap-initdb.yaml    # init: cria as roles/bancos dos apps
+    │   ├── 04-service.yaml             # Service postgres + NodePort 30432
+    │   └── kustomization.yaml
     ├── apps/                           # Sob demanda; um recurso Kubernetes por arquivo YAML
     │   ├── kustomization.yaml          # Compõe as pastas dos apps
     │   └── tileserver/                 # TileServer GL
@@ -833,7 +844,7 @@ Manifestos: `manifests/built-in/ceph/` (`06-dashboard-namespace.yaml`, `07-dashb
 
 ### Authentik (`authentik.lan`)
 
-Provedor de identidade em `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, PostgreSQL bitnami embutido — não o YugabyteDB do cluster, porque as migrações do Django exigem um PG de verdade — cert mkcert `authentik-tls`). Está aqui para ser o **login único** dos apps do cluster; o único app ligado nele até agora é o LiteLLM.
+Provedor de identidade em `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, cert mkcert `authentik-tls`). O banco é o **PostgreSQL 18 compartilhado do namespace `data`** (ver [PostgreSQL (data)](#postgresql-data) abaixo) — banco `authentik`, dono a role `authentik` — por isso o `postgresql:` embutido do chart está `enabled: false` e a conexão vem inteira do Secret `authentik-config` (`AUTHENTIK_POSTGRESQL__*`, entregue ao server e ao worker por `envFrom`). Está aqui para ser o **login único** dos apps do cluster; o único app ligado nele até agora é o LiteLLM.
 
 Grupos, providers e applications são **declarativos**, via um blueprint que o chart monta no worker:
 
@@ -862,7 +873,7 @@ kubectl -n platform get secret authentik-config -o jsonpath='{.data.AUTHENTIK_BO
 
 ### LiteLLM (`litellm.lan`)
 
-Proxy compatível com a API da OpenAI em `https://litellm.lan` (Ingress ns `platform` → `litellm:4000`, certificado mkcert dedicado `litellm-tls`). Substitui o LiteLLM que rodava no docker-compose do `infra/`; o banco é o **próprio YugabyteDB do cluster** (ns `data`, YSQL `:5433`) — que está aqui justamente pra isso.
+Proxy compatível com a API da OpenAI em `https://litellm.lan` (Ingress ns `platform` → `litellm:4000`, certificado mkcert dedicado `litellm-tls`). Substitui o LiteLLM que rodava no docker-compose do `infra/`; o banco é o **PostgreSQL 18 compartilhado do cluster** (ns `data`, banco `litellm`, `?schema=litellm`) — a mesma instância que serve o Authentik, num banco só dele.
 
 **DNS:** `litellm.lan` precisa ser adicionado como rewrite no AdGuard (`Filters → DNS rewrites` → `192.168.1.20`), como os outros nomes `.lan`. Os rewrites do AdGuard são **por host, não wildcard**, e a config vive dentro do PVC `adguard-conf-fs` (não está no repo) — então esse é um passo manual, uma vez só.
 
@@ -886,13 +897,24 @@ curl -sk https://litellm.lan/v1/models -H "Authorization: Bearer $MASTER_KEY"
 Detalhes do deploy que importam antes de mexer:
 - **Chart**: `litellm-helm` oficial, puxado como chart **OCI** de `ghcr.io/berriai` (o índice Helm clássico `berriai.github.io/litellm-helm` dá 404). A `url` do repo Secret é o **pai** do chart no path OCI — o Argo CD monta `oci://<url>/<chart>`, daí `url: ghcr.io/berriai` + `chart: litellm-helm`. O `targetRevision` tem que ser tag exata (OCI não aceita range semver).
 - **Não existe IngressClass neste cluster**: todo Ingress roteia pela annotation `haproxy.org/ingress.class` e fica com CLASS `<none>`. Por isso o `ingress.className` do chart está como `""` (o default `nginx` renderizaria `ingressClassName: nginx` e quebraria o roteamento).
-- **Dois hooks PreSync rodam antes de cada sync.** O `litellm-db-bootstrap` (wave `-1`, imagem `postgres:17-alpine`) cria de forma idempotente a role/database/schema `litellm` no YugabyteDB; em seguida o job `litellm-migrations` do próprio chart roda o `prisma migrate deploy`. Os dois podem rodar de novo sem problema.
-- **`PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK=true` é obrigatório.** O YugabyteDB não bloqueia no `pg_advisory_lock` como o Postgres: quando uma tentativa é morta por timeout segurando o lock, todas as seguintes morrem em 10s com `P1002 ... postgres advisory lock`. Sem a flag o primeiro deploy empaca com ~88 de 127 migrations aplicadas. É seguro aqui porque existe um único escritor (o hook PreSync) e o proxy sobe com `DISABLE_SCHEMA_UPDATE=true`.
+- **Um hook PreSync roda antes de cada sync**: o job `litellm-migrations` do próprio chart, que roda o `prisma migrate deploy` antes do Deployment. Pode rodar de novo sem problema. Nada cria a role/banco/schema na hora do sync — eles nascem com a instância, no script de init do PostgreSQL compartilhado (`manifests/postgres/03-configmap-initdb.yaml`).
 - **`ENFORCE_PRISMA_MIGRATION_CHECK=true` também é obrigatório.** Sem ela o LiteLLM loga "migration failed but continuing startup" e **sai com 0** — o Job aparece como `Completed` com o banco pela metade. Com ela, falha de migration falha o hook e para o sync.
 - **Memória**: limite de 2Gi, não menos. Tanto o job de migrations (~1,7Gi de pico) quanto o proxy são OOMKilled com 1Gi. O `strategy: Recreate` evita dois proxies num rollout neste nó único e apertado de memória.
 - **Métricas precisam do callback**: o `/metrics` só existe com `litellm_settings.callbacks: [prometheus]` — sem ele o LiteLLM devolve 404 e o target do Prometheus fica DOWN (o ServiceMonitor em si funciona: o scrape acontece). Com o callback ligado o endpoint também passa a exigir a API key, daí o `require_auth_for_metrics_endpoint: false` (o endpoint é ClusterIP).
 
 Manifestos: `manifests/argocd/litellm/`. Secrets: ver a tabela acima.
+
+### PostgreSQL (data)
+
+A **instância de banco compartilhada** do cluster: um PostgreSQL 18.6 — a imagem oficial `postgres:18.6`, sem chart — no namespace `data`, servindo as duas aplicações que precisam de um banco SQL de verdade, cada uma no seu **próprio banco e com a própria role**: `litellm` (role `litellm`, schema `litellm`, do Prisma) e `authentik` (role `authentik`, do Django). Uma instância, dois clientes: as roles nascem com o mínimo de privilégio (`NOSUPERUSER NOCREATEDB NOCREATEROLE`) e o superusuário nunca sai do pod.
+
+Os manifestos são versionados neste repo, em `manifests/postgres/`, porque aqui não há chart de terceiros para pinar — só a imagem oficial. Por isso a Application `postgres` (`manifests/argocd/postgres/02-application.yaml`) segue o padrão do vaultwarden: `source` apontando para este repositório, `path: manifests/postgres`, onde um `kustomization.yaml` compõe o PVC, o Deployment, o ConfigMap de init e o Service (o Argo CD detecta kustomize sozinho). O PVC carrega `Prune=false,Delete=false` — ele guarda dado de verdade e não pode sumir quando a Application for podada ou excluída.
+
+Dentro do cluster o endereço é `postgres.data.svc.cluster.local:5432`, que é como o LiteLLM e o Authentik se conectam. Do host, o Service é um NodePort (`30432`) que o `docker-compose` publica como `127.0.0.1:5432:30432` — **loopback de propósito**: todas as outras portas publicadas existem para a LAN alcançar o host, mas o banco não pode sair dele. NodePort e não LoadBalancer pelo mesmo motivo dos ingresses: o VIP do MetalLB é anunciado dentro da rede docker do cluster e não é alcançável da LAN. E `30432` e não `5432` porque porta de NodePort tem que ficar no range 30000-32767 do apiserver.
+
+A autenticação é `scram-sha-256` para toda conexão remota: o entrypoint da imagem anexa `host all all all scram-sha-256` ao `pg_hba.conf`, e essa linha pega todo TCP — inclusive o que chega pelo NodePort. O único `trust` que sobra é o socket unix e o loopback *dentro* do pod (o default do initdb), inalcançável de fora, já que tráfego do NodePort chega com o IP de origem do cliente, nunca `127.0.0.1`. O `POSTGRES_HOST_AUTH_METHOD` não é definido de propósito — apontá-lo para `trust` seria um superusuário sem senha. A senha do superusuário vive no Secret gitignored `postgres-superuser`; cada aplicação recebe só as credenciais da própria role, em Secrets aplicados **nos dois** namespaces, `platform` e `data` (ver [Segredos](#segredos)).
+
+> **O volume monta em `/var/lib/postgresql`, não em `/var/lib/postgresql/data`.** Na 18 a imagem moveu o `PGDATA` para `/var/lib/postgresql/18/docker`, com o `VOLUME` declarado no pai, e montar no caminho das v15–v17 faz o entrypoint abortar no boot com "there appears to be PostgreSQL data in: /var/lib/postgresql/data (unused mount/volume)". Deixar o `PGDATA` no default é também o que mantém viável o `pg_upgrade --link` num upgrade de major.
 
 ---
 
@@ -1004,7 +1026,7 @@ volume, permanecendo `Attached=true` por um volume que nenhum pod vivo está usa
 Reproduzir essa heurística contra o estado ao vivo durante um rollout afetado reporta
 **zero órfãos**, com os mapeamentos obsoletos ali na frente. Não use `--all` como
 contorno — ele desmapeia todos os dispositivos, inclusive os que servem pods rodando
-(Prometheus, Grafana, authentik-postgresql).
+(Prometheus, Grafana, postgres).
 
 O teste definitivo é se o dispositivo está **de fato montado**:
 
@@ -1147,6 +1169,7 @@ docker compose up -d     # fresh start
 | `6443` | TCP | Kubernetes API Server |
 | `8082` | TCP | HAProxy Ingress HTTP (→ NodePort 30080) |
 | `8443` | TCP | HAProxy Ingress HTTPS (→ NodePort 30443) |
+| `5432` | TCP | PostgreSQL (→ NodePort 30432, **só no loopback do host**) |
 
 ---
 

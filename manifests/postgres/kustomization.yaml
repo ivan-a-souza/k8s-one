@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# SEM 00-namespace.yaml, de propósito. O vaultwarden declara o próprio
+# Namespace; aqui não, porque o ns `data` viraria um recurso RASTREADO pelo
+# Argo CD e, ao excluir a Application, o finalizer apagaria o NAMESPACE — o que
+# leva o PVC junto numa cascata do k8s e anularia o Delete=false dele.
+# Com `CreateNamespace=true` na Application, o ns fica fora do tracking, como
+# já está hoje.
+resources:
+  - 01-pvc.yaml
+  - 02-deployment.yaml
+  - 03-configmap-initdb.yaml
+  - 04-service.yaml

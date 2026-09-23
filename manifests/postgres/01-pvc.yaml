@@ -1,0 +1,28 @@
+# PostgreSQL 18 — dados da instância compartilhada (ns data).
+#
+# Substitui os DOIS PVCs do YugabyteDB (5Gi do master + 10Gi do tserver) e
+# também o PVC de 5Gi do PostgreSQL que o chart do Authentik subia: saem 20Gi
+# de provisionamento, entra um banco so.
+#
+# 5Gi e o tamanho honesto: o banco do authentik ocupa ~126MB e o do litellm
+# esta vazio. O storageClass ceph-block tem allowVolumeExpansion=true, entao
+# crescer depois e online (sem recriar o volume nem parar o banco).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: data
+  annotations:
+    # Prune=false: o Argo apagaria o PVC se ele saisse dos manifestos.
+    # Delete=false: e tambem o apagaria ao EXCLUIR a Application (a doc do
+    # Argo cita PVC como o caso de uso desta opcao).
+    # Os dois sao necessarios, e agora o volume tem dado de verdade dentro —
+    # o volume so sai por `kubectl -n data delete pvc postgres-data`.
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 5Gi

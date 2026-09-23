@@ -1,0 +1,45 @@
+# Argo CD Application do PostgreSQL 18 — a instância de banco do cluster.
+#
+# Fonte: o PRÓPRIO repo GitOps (k8s-one), caminho manifests/postgres — que tem
+# um kustomization.yaml (o Argo CD detecta kustomize sozinho). Mesmo padrão do
+# vaultwarden, o outro app do cluster com manifestos próprios: aqui não há
+# chart de terceiros, a fonte é a imagem oficial postgres:18.6.
+#
+# Serve as duas aplicações em bancos separados (litellm e authentik). O role e
+# a senha são criados no primeiro boot, pelo script do ConfigMap postgres-initdb.
+#
+# Sem ignoreDifferences: o app `yugabyte` precisava deles por causa do
+# volumeClaimTemplates do StatefulSet. Aqui o PVC é um recurso avulso.
+#
+# ⚠️ O source aponta para o git REMOTO: esta Application só sincroniza depois
+# que manifests/postgres estiver na main. Para não depender disso no corte, os
+# manifestos são aplicados à mão primeiro (`kubectl apply -k manifests/postgres`)
+# e a Application apenas ADOTA os recursos que já existem.
+#
+# Segredo `postgres-superuser` NÃO está no repo (gitignored) — criar antes com:
+#   scripts/create-secrets.sh
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: postgres
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ivan-a-souza/k8s-one.git
+    targetRevision: main
+    path: manifests/postgres
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: data
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # `data` já existe hoje (foi criado pelo app yugabyte). O CreateNamespace
+      # mantém o ns FORA do tracking do Argo — é o que impede o finalizer de
+      # apagar o namespace inteiro (e o PVC junto) ao excluir esta Application.
+      - CreateNamespace=true

@@ -15,8 +15,11 @@ spec:
       releaseName: authentik
       values: |
         # Authentik 2026.8.1 — SSO/IdP no k8s-one (domínio platform).
-        # Banco = PostgreSQL bitnami embutido no chart (migrações Django/DDL exigem PG real;
-        # YugabyteDB fica no ns data p/ LiteLLM e apps YSQL). 2026.x não usa mais Redis.
+        # Banco = a instância PostgreSQL compartilhada do ns data
+        # (manifests/postgres/), a MESMA que serve o LiteLLM, em banco separado
+        # (`authentik`, role `authentik`). A migração do PG que o chart subia
+        # saiu do PG 17.11 para o 18.6 por pg_dump/pg_restore.
+        # 2026.x não usa mais Redis.
         authentik:
           enabled: true
           existingSecret:
@@ -28,24 +31,18 @@ spec:
         blueprints:
           configMaps:
             - authentik-blueprints
+        # PostgreSQL embutido do chart DESLIGADO: o banco agora é o do cluster
+        # (ns data), o mesmo que serve o LiteLLM. Ficou ligado até o SSO estar
+        # validado no banco novo — era o caminho de rollback. Desligar aqui faz
+        # o Argo CD podar o StatefulSet do PG embutido (o PVC dele NÃO é
+        # rastreado pelo Argo e sai à mão).
+        #
+        # ⚠️ A conexão NÃO é configurada aqui: `authentik-config` traz
+        # AUTHENTIK_POSTGRESQL__{HOST,PORT,USER,PASSWORD,NAME,SSLMODE} e o
+        # server/worker recebem esse Secret inteiro por `envFrom`. Trocar de
+        # banco é editar secrets/authentik.env e re-rodar scripts/create-secrets.sh.
         postgresql:
-          enabled: true
-          auth:
-            username: authentik
-            # Senha vem do Secret gitignored (secrets/postgresql-auth.yaml),
-            # criado por scripts/create-secrets.sh. Nunca embutir aqui.
-            existingSecret: authentik-postgresql-auth
-            database: authentik
-          primary:
-            resources:
-              requests:
-                memory: 128Mi
-              limits:
-                memory: 512Mi
-            persistence:
-              enabled: true
-              storageClass: ceph-block
-              size: 5Gi
+          enabled: false
         serviceAccount:
           create: false
         server:

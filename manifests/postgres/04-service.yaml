@@ -1,0 +1,28 @@
+# Um Service serve os dois caminhos:
+#   - in-cluster: postgres.data.svc.cluster.local:5432 (LiteLLM e Authentik)
+#   - host:       NodePort 30432, publicado no loopback pelo docker-compose
+#
+# NodePort e não LoadBalancer: o VIP do MetalLB (192.168.1.200) é anunciado
+# dentro da rede docker do cluster e NÃO é alcançável da LAN nem do host — o
+# caminho que funciona é o mesmo dos ingresses, NodePort alcançado no IP do
+# container e publicado pelo compose.
+#
+# 30432 (e não 5432): a porta do NodePort vive no range default do apiserver,
+# 30000-32767, e não pode colidir com o que já existe — no cluster, só 30080,
+# 30443 e 30528 estão em uso (todos do LoadBalancer do HAProxy).
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: data
+  labels:
+    app: postgres
+spec:
+  type: NodePort
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      nodePort: 30432

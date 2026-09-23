@@ -43,6 +43,11 @@ services:
       - "0.0.0.0:30443:30443"
       - "0.0.0.0:8082:30080"
       - "0.0.0.0:8443:30443"
+      # PostgreSQL do cluster (Service `postgres` no ns data, NodePort 30432).
+      # Loopback, e NÃO 0.0.0.0 como as outras: as demais portas têm que existir
+      # para a LAN alcançar o host, mas o banco não deve sair dele. O caminho
+      # LAN/tailnet continua sendo dentro do cluster, via Service.
+      - "127.0.0.1:5432:30432"
     restart: unless-stopped
     # PID 1 drains PVC consumers and detaches RBD/CephFS before stopping Ceph.
     stop_grace_period: 5m

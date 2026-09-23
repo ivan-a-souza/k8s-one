@@ -1,0 +1,193 @@
+# PostgreSQL 18.6 (imagem OFICIAL) — a instância compartilhada do ns data,
+# que serve as duas aplicações em bancos separados:
+#   litellm   -> role litellm   (schema litellm, do Prisma)
+#   authentik -> role authentik (Django)
+# Substitui o YugabyteDB (que só servia o LiteLLM) e o PostgreSQL que o chart
+# do Authentik subia por conta própria.
+#
+# Deployment (e não StatefulSet) + PVC avulso, mesmo desenho do vaultwarden:
+#   - sem `volumeClaimTemplates`, o Argo não mostra o diff eterno do
+#     StatefulSet (o app yugabyte precisava de `ignoreDifferences` por isso) e
+#     o PVC vira um recurso RASTREÁVEL — dá para blindá-lo com
+#     Prune=false,Delete=false. PVC nascido de volumeClaimTemplates não tem
+#     tracking do Argo, então as anotações de sync-option nele seriam inócuas.
+#   - não precisamos de identidade ordinal nem DNS estável: 1 réplica, e os
+#     consumidores falam com o Service `postgres`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: data
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  # Recreate: o volume é ReadWriteOnce e o nó é único. Com RollingUpdate o
+  # maxSurge tentaria subir um segundo pod disputando o mesmo PVC (mesmo
+  # raciocínio do vaultwarden e do LiteLLM).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # fsGroup é OBRIGATÓRIO aqui: o diretório raiz de um PVC RBD recém
+      # provisionado é root:root, e o kubelet só concede a permissão de grupo
+      # ao aplicar o fsGroup. Sem isso o uid não-root não consegue criar o
+      # subdiretório do PGDATA e o initdb falha.
+      # OnRootMismatch (e não Always) evita o chown recursivo a cada boot —
+      # neste storage (Ceph sobre nbd) isso não é de graça.
+      securityContext:
+        runAsUser: 999        # usuário `postgres` da imagem DEBIAN (na alpine é 70)
+        runAsGroup: 999
+        runAsNonRoot: true
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      # O kubelet IGNORA o STOPSIGNAL=SIGINT da imagem (que significa *fast
+      # shutdown*) e manda SIGTERM, que no PostgreSQL é *smart shutdown*: ele
+      # espera os clientes desconectarem, os pools do Prisma/Django não
+      # desconectam, e o pod acaba levando SIGKILL no fim do grace period —
+      # ou seja, crash recovery em todo rollout. O preStop abaixo manda o
+      # SIGINT que a imagem queria.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: postgres:18.6
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - pg_ctl stop -D "$PGDATA" -m fast -w -t 30 || true
+          env:
+            # A autenticação NÃO é configurada aqui, e isso é de propósito.
+            # Desde a PG 14 o entrypoint da imagem ANEXA ao pg_hba.conf a linha
+            # `host all all all scram-sha-256`, e é ela que pega todo TCP vindo
+            # de fora do pod — inclusive o NodePort 30432. O único `trust` que
+            # sobra é o socket unix e o loopback DENTRO do pod (o default do
+            # initdb), inalcançável de fora: tráfego do NodePort chega com o IP
+            # de origem do cliente, nunca 127.0.0.1.
+            # NÃO setar POSTGRES_HOST_AUTH_METHOD — setá-lo para `trust` seria
+            # repetir exatamente o furo do YugabyteDB (superuser sem senha), que
+            # é uma das razões desta troca.
+            # `listen_addresses` também não precisa: o default da imagem é '*'.
+            - name: POSTGRES_USER
+              value: postgres
+            # `postgres` de propósito: os dois bancos de aplicação são criados
+            # pelo script de init abaixo, cada um com o dono certo. Se fosse
+            # uma das aplicações, o entrypoint a criaria como superusuário.
+            - name: POSTGRES_DB
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-superuser
+                  key: postgres-password
+          ports:
+            - name: postgres
+              containerPort: 5432
+          volumeMounts:
+            # ⚠️ A ARMADILHA DA v18. Na 18 o PGDATA deixou de ser
+            # /var/lib/postgresql/data e virou /var/lib/postgresql/18/docker,
+            # com o VOLUME declarado no PAI. O mount tem de ser
+            # /var/lib/postgresql: montar em .../data (como as v15–v17 pediam,
+            # e como a PoC antiga deste repo fazia) faz o entrypoint ABORTAR no
+            # boot com "there appears to be PostgreSQL data in:
+            # /var/lib/postgresql/data (unused mount/volume)".
+            # Não sobrescrever PGDATA — usar o default é o que mantém o
+            # `pg_upgrade --link` viável num upgrade de major.
+            - name: data
+              mountPath: /var/lib/postgresql
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            # As senhas das roles de aplicação, montadas como arquivo. O
+            # superusuário nunca é exposto às aplicações.
+            - name: litellm-db
+              mountPath: /run/secrets/litellm-db
+              readOnly: true
+            - name: authentik-db
+              mountPath: /run/secrets/authentik-db
+              readOnly: true
+            # readOnlyRootFilesystem exige estes dois: o socket da imagem
+            # Debian fica em /var/run/postgresql (não em /tmp) e o diretório da
+            # imagem é read-only. Mesmo arranjo do PG do authentik, que já roda
+            # assim neste cluster.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            # Contra os ~370m/1344Mi do YB somados aos ~128Mi do PG embutido,
+            # devolve bastante folga para um nó com 3 CPU / 8.2 GiB alocáveis.
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # pg_isready NÃO autentica: só pergunta ao postmaster se ele aceita
+          # conexões (0 = aceitando, 1 = recusando/em recovery, 2 = sem
+          # resposta). -h 127.0.0.1 força o caminho TCP em vez do socket, e o
+          # loopback dentro do pod é `trust`, então a probe não precisa de senha.
+          #
+          # Timeouts com folga: o nó divide CPU com o desktop inteiro e este
+          # storage é lento (checkpoint de <1MB levando 10–14s no PG do
+          # authentik). O startupProbe é generoso porque o initdb roda a frio.
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432"]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60      # até 10 min para o primeiro initdb
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432"]
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: initdb
+          configMap:
+            name: postgres-initdb
+            # 0555: o entrypoint EXECUTA o script quando ele tem bit de
+            # execução (e faz `source` quando não tem) — como subprocesso o
+            # comportamento é mais previsível.
+            defaultMode: 0555
+        - name: litellm-db
+          secret:
+            secretName: litellm-db
+            # 0440 e NÃO 0400: arquivos montados de Secret pertencem a root e
+            # o fsGroup só troca o GRUPO — com 0400 o uid 999 não lê e o
+            # script de init morre.
+            defaultMode: 0440
+        - name: authentik-db
+          secret:
+            secretName: authentik-postgresql-auth
+            defaultMode: 0440
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
