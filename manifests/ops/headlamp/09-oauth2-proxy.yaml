@@ -1,0 +1,119 @@
+# oauth2-proxy — auth proxy na frente do Headlamp (login via Authentik).
+#
+# Por que existe: o Headlamp em modo OIDC encaminha o token do usuario para a
+# API, que neste cluster nao confia no provider (kube-apiserver sem --oidc-*).
+# Em modo "service account" ele autentica todo mundo pelo SA, mas NAO exige
+# login — o que so e seguro atras de um auth proxy (a propria flag do Headlamp
+# diz isso). Este proxy e esse gate: sem sessao oauth2 valida, nada chega ao
+# Headlamp.
+#
+# Fluxo: navegador -> ingress (headlamp.lan) -> ESTE proxy -> Headlamp.
+# O proxy faz o OIDC contra o Authentik (provider "Headlamp", redirect
+# /oauth2/callback) e guarda a sessao num cookie.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: ops
+  labels:
+    app: oauth2-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app: oauth2-proxy
+    spec:
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
+          args:
+            - --config=/dev/null
+            - --provider-ca-file=/certs/ca.crt
+            # O Authentik emite o id_token com email_verified=false (nao ha
+            # verificacao de email no fluxo). Sem isto o callback morre com
+            # "email in id_token (...) isn't verified" (HTTP 500). O email vem
+            # do IdP confiavel, entao aceitar nao-verificado e seguro aqui.
+            - --insecure-oidc-allow-unverified-email=true
+          ports:
+            - name: http
+              containerPort: 4180
+          # Client id/secret (mesmo provider "Headlamp" do Authentik) e
+          # cookie secret vem do Secret gitignored oauth2-proxy.
+          envFrom:
+            - secretRef:
+                name: oauth2-proxy
+          env:
+            - name: OAUTH2_PROXY_PROVIDER
+              value: oidc
+            - name: OAUTH2_PROXY_OIDC_ISSUER_URL
+              value: https://authentik.lan/application/o/headlamp/
+            # Upstream = o proprio Headlamp (apos autenticado).
+            # ATENCAO: opcoes de LISTA usam env PLURAL (trailing S). A flag e
+            # --upstream, mas o env e OAUTH2_PROXY_UPSTREAMS — o singular e
+            # ignorado em silencio e o proxy cai no modo "arquivos estaticos"
+            # (todo request vira 404 "page not found").
+            - name: OAUTH2_PROXY_UPSTREAMS
+              value: http://headlamp.ops.svc.cluster.local:80
+            - name: OAUTH2_PROXY_HTTP_ADDRESS
+              value: 0.0.0.0:4180
+            - name: OAUTH2_PROXY_REDIRECT_URL
+              value: https://headlamp.lan/oauth2/callback
+            # Atrás do ingress HAProxy (que termina TLS e manda X-Forwarded-*).
+            - name: OAUTH2_PROXY_REVERSE_PROXY
+              value: "true"
+            - name: OAUTH2_PROXY_COOKIE_SECURE
+              value: "true"
+            # Tambem lista -> env plural.
+            - name: OAUTH2_PROXY_COOKIE_DOMAINS
+              value: headlamp.lan
+            - name: OAUTH2_PROXY_EMAIL_DOMAINS
+              value: "*"
+            - name: OAUTH2_PROXY_SCOPE
+              value: openid profile email
+            - name: OAUTH2_PROXY_SKIP_PROVIDER_BUTTON
+              value: "true"
+            # O issuer e https://authentik.lan (cert mkcert). O CA vem do secret
+            # headlamp-tls (ca.crt), passado como ARG --provider-ca-file (o env
+            # singular OAUTH2_PROXY_PROVIDER_CA_FILE e ignorado — o correto seria
+            # OAUTH2_PROXY_PROVIDER_CA_FILES; mantido como arg por ser explicito).
+          volumeMounts:
+            - name: mkcert-ca
+              mountPath: /certs
+              readOnly: true
+          resources:
+            requests:
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: mkcert-ca
+          secret:
+            secretName: headlamp-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: ops
+  labels:
+    app: oauth2-proxy
+spec:
+  selector:
+    app: oauth2-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 4180

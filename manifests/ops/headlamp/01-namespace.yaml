@@ -1,7 +1,8 @@
-# Headlamp — dashboard do Kubernetes (in-cluster, basic auth no ingress)
-# Acesso: https://headlamp.naesquina.com.br (login via token do SA headlamp-admin)
-# Basic auth (HAProxy): secret 'headlamp-basic-auth' gerado por kustomize
-# (manifests/apps/secrets/headlamp.env — gitignored).
+# Headlamp — dashboard do Kubernetes (in-cluster).
+# Acesso: https://headlamp.lan — login via SSO no Authentik (OIDC).
+# Fallback: login por token do SA headlamp-admin continua disponivel.
+# RBAC: SA headlamp-admin -> ClusterRole headlamp-admin (admin com guarda-corpo;
+# ver 03-cluster-role.yaml). Sem basic auth no ingress.
 
 apiVersion: v1
 kind: Namespace

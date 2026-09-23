@@ -10,3 +10,15 @@ resources:
   - 06-service.yaml
   - 07-ingress.yaml
   - 08-certificate.yaml
+  - 09-oauth2-proxy.yaml
+
+# Plugin "Sair" do Headlamp (botao no app bar). Empacotado num ConfigMap e
+# montado em /headlamp/static-plugins/logout pelo Deployment.
+configMapGenerator:
+  - name: headlamp-plugin-logout
+    namespace: ops
+    files:
+      - plugin-logout/package.json
+      - plugin-logout/main.js
+generatorOptions:
+  disableNameSuffixHash: true

@@ -22,6 +22,30 @@ spec:
           args: ["--in-cluster"]
           ports:
             - containerPort: 4466
+          # O login NAO e feito pelo Headlamp: quem faz o OIDC com o Authentik e
+          # o oauth2-proxy (ns ops, arquivo 09-oauth2-proxy.yaml), que fica na
+          # frente. O Headlamp so roda atras dele.
+          #
+          # UNSAFE_USE_SERVICE_ACCOUNT_TOKEN=true: o Headlamp autentica a API
+          # pelo token do SA headlamp-admin (admin compartilhado). Isto e seguro
+          # porque o oauth2-proxy e o gate: sem sessao valida nada chega aqui.
+          # (Sem proxy, esta flag deixaria o Headlamp aberto sem login.)
+          #
+          # PROXY_AUTH=true: confia nos headers do proxy (X-Forwarded-Email/User)
+          # para identificar o usuario no endpoint /me. So o proxy alcanca o
+          # Headlamp (Service ClusterIP, nao exposto no ingress).
+          env:
+            - name: HEADLAMP_CONFIG_UNSAFE_USE_SERVICE_ACCOUNT_TOKEN
+              value: "true"
+            - name: HEADLAMP_CONFIG_PROXY_AUTH
+              value: "true"
+          # Plugin "Sair" (botao no app bar que faz o logout de verdade via
+          # oauth2-proxy). O ConfigMap e gerado pelo kustomization a partir de
+          # plugin-logout/.
+          volumeMounts:
+            - name: plugin-logout
+              mountPath: /headlamp/static-plugins/logout
+              readOnly: true
           resources:
             limits:
               memory: 256Mi
@@ -35,3 +59,7 @@ spec:
               port: 4466
             initialDelaySeconds: 5
             periodSeconds: 10
+      volumes:
+        - name: plugin-logout
+          configMap:
+            name: headlamp-plugin-logout

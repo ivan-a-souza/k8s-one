@@ -796,12 +796,26 @@ Works from anywhere with Tailscale on: the tailnet DNS (global nameserver `192.1
 
 ### Headlamp (`headlamp.lan`)
 
-Dashboard at `https://headlamp.lan` (ingress routes by Host; mkcert cert `headlamp.lan`). HAProxy basic-auth was removed — login is **Headlamp's own login** (bearer token). RBAC: SA `headlamp-admin` (ns `headlamp`) bound to ClusterRole **`view`** (read-only).
+Dashboard at `https://headlamp.lan` (ingress routes by Host; mkcert cert `headlamp.lan`). Login é **SSO no Authentik**, feito por um **oauth2-proxy** na frente do Headlamp.
 
-Extract the persistent Service Account token to log in:
+**Arquitetura (por que o proxy):** o Headlamp tem dois modos de OIDC, mutuamente exclusivos:
+- **OIDC nativo**: exige login e encaminha o token do usuário para a API. Como o `kube-apiserver` deste cluster **não** tem flags `--oidc-*`, a API rejeita o token (401, "the cluster did not accept your sign-in").
+- **Service account** (`HEADLAMP_CONFIG_UNSAFE_USE_SERVICE_ACCOUNT_TOKEN=true`): autentica todos pelo SA, mas **não exige login** — só é seguro atrás de um auth proxy.
+
+Escolhemos o 2º + um proxy: `navegador → ingress → oauth2-proxy → Headlamp`. O `oauth2-proxy` (ns `ops`, `09-oauth2-proxy.yaml`) faz o OIDC contra o Authentik (provider "Headlamp", redirect `https://headlamp.lan/oauth2/callback`) e guarda a sessão num cookie; o ingress aponta para ele, não para o Headlamp. Sem sessão válida, nada chega ao Headlamp.
+
+RBAC: SA `headlamp-admin` (ns `ops`) → ClusterRole **`headlamp-admin`** — admin amplo, mas **sem `delete` em namespaces, PVs e PVCs** (guarda-corpo de dados; ver `03-cluster-role.yaml`). O login controla quem entra; a permissão na API é a do SA (admin compartilhado).
+
+Env relevante do Headlamp (`05-deployment.yaml`): `HEADLAMP_CONFIG_UNSAFE_USE_SERVICE_ACCOUNT_TOKEN=true` + `HEADLAMP_CONFIG_PROXY_AUTH=true` (confia nos headers `X-Forwarded-*` do proxy). O client_id/secret é o mesmo par `HEADLAMP_OIDC_*` do blueprint, guardado no Secret gitignored `oauth2-proxy` (`create-secrets.sh`), junto do `cookie_secret`.
+
+> Alternativa per-user (não usada): configurar OIDC no próprio `kube-apiserver` (`--oidc-*`) + RBAC por identidade — muda o modelo para per-user e exige rebuild/recreate do container.
+
+**Logout ("Sair"):** o Headlamp não tem logout no servidor (o botão nativo só limpa o token local, e a sessão real é o cookie `_oauth2_proxy`). Por isso há um **plugin próprio** (`plugin-logout/`, montado em `/headlamp/static-plugins/logout` via ConfigMap) que adiciona um botão **Sair** no app bar. Ele vai para `/oauth2/sign_out?rd=<end-session do Authentik>`: limpa o cookie do proxy **e** encerra a sessão SSO no Authentik, voltando para o login. O plugin é escrito à mão em UMD (o Headlamp injeta os módulos em `window.pluginLib`), sem toolchain/npm.
+
+Fallback por token (quando o prompt pede token):
 
 ```bash
-kubectl -n headlamp get secret headlamp-admin-token -o jsonpath='{.data.token}' | base64 -d
+kubectl -n ops get secret headlamp-admin-token -o jsonpath='{.data.token}' | base64 -d
 ```
 
 The `headlamp-admin-token` secret (type `kubernetes.io/service-account-token`) is long-lived (K8s 1.24+). Since Headlamp runs with `--in-cluster`, it may authenticate automatically via the projected token — the command above is for when the login prompt asks for a token.

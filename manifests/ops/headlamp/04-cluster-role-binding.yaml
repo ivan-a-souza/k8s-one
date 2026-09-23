@@ -5,7 +5,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: headlamp-view
+  name: headlamp-admin
 subjects:
   - kind: ServiceAccount
     name: headlamp-admin

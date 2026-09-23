@@ -1,191 +1,65 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: headlamp-view
+  name: headlamp-admin
   labels:
     app: headlamp
     managed-by: clawdete
+# Role dedicada do Headlamp (SA headlamp-admin). Admin amplo, com guarda-corpo.
+#
+# RBAC e ADITIVO — nao existe "deny". "Admin sem delete em namespaces/PVs/PVCs"
+# so da para expressar ENUMERANDO os recursos que podem sofrer delete:
+#   - regra 1: leitura + escrita em TODOS os recursos, sem delete;
+#   - regra 2: delete liberado apenas nos recursos de trabalho.
+# namespaces, persistentvolumes e persistentvolumeclaims ficam de fora da
+# regra 2 (delete de PVC no ceph-block destroi os dados do PV). A lista da
+# regra 2 cresce conforme a necessidade.
 rules:
-- apiGroups:
-  - ''
-  resources:
-  - nodes
-  - nodes/status
-  - nodes/proxy
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - cert-manager.io
-  resources:
-  - certificates
-  - certificaterequests
-  - issuers
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - acme.cert-manager.io
-  resources:
-  - challenges
-  - orders
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ''
-  resources:
-  - configmaps
-  - endpoints
-  - persistentvolumeclaims
-  - persistentvolumeclaims/status
-  - pods
-  - replicationcontrollers
-  - replicationcontrollers/scale
-  - serviceaccounts
-  - services
-  - services/status
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ''
-  resources:
-  - bindings
-  - limitranges
-  - namespaces/status
-  - pods/log
-  - pods/status
-  - replicationcontrollers/status
-  - resourcequotas
-  - resourcequotas/status
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ''
-  resources:
-  - namespaces
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ''
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - discovery.k8s.io
-  resources:
-  - endpointslices
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - apps
-  resources:
-  - controllerrevisions
-  - daemonsets
-  - daemonsets/status
-  - deployments
-  - deployments/scale
-  - deployments/status
-  - replicasets
-  - replicasets/scale
-  - replicasets/status
-  - statefulsets
-  - statefulsets/scale
-  - statefulsets/status
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - autoscaling
-  resources:
-  - horizontalpodautoscalers
-  - horizontalpodautoscalers/status
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - cronjobs
-  - cronjobs/status
-  - jobs
-  - jobs/status
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - extensions
-  resources:
-  - daemonsets
-  - daemonsets/status
-  - deployments
-  - deployments/scale
-  - deployments/status
-  - ingresses
-  - ingresses/status
-  - networkpolicies
-  - replicasets
-  - replicasets/scale
-  - replicasets/status
-  - replicationcontrollers/scale
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - policy
-  resources:
-  - poddisruptionbudgets
-  - poddisruptionbudgets/status
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingresses
-  - ingresses/status
-  - networkpolicies
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - resource.k8s.io
-  resources:
-  - resourceclaims
-  - resourceclaims/status
-  - resourceclaimtemplates
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - metrics.k8s.io
-  resources:
-  - pods
-  - nodes
-  verbs:
-  - get
-  - list
-  - watch
-
+  # Leitura + escrita em tudo, sem delete.
+  - apiGroups:
+      - '*'
+    resources:
+      - '*'
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+  # Delete apenas nos recursos de trabalho (sem namespaces/PVs/PVCs).
+  - apiGroups:
+      - '*'
+    resources:
+      - pods
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+      - controllerrevisions
+      - jobs
+      - cronjobs
+      - services
+      - endpoints
+      - endpointslices
+      - configmaps
+      - secrets
+      - serviceaccounts
+      - replicationcontrollers
+      - ingresses
+      - networkpolicies
+      - horizontalpodautoscalers
+      - poddisruptionbudgets
+      - events
+      - roles
+      - rolebindings
+      - certificates
+      - certificaterequests
+    verbs:
+      - delete
+      - deletecollection
+  # Discovery da API (nonResource) — o Headlamp usa para montar a UI.
+  - nonResourceURLs:
+      - '*'
+    verbs:
+      - get

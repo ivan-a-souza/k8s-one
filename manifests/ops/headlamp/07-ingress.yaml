@@ -16,10 +16,13 @@ spec:
     - host: headlamp.lan
       http:
         paths:
+# O ingress aponta para o oauth2-proxy (nao direto para o Headlamp): ele faz o
+# login OIDC no Authentik e so entao encaminha para o Headlamp. O caminho
+# /oauth2/* e tratado pelo proprio proxy.
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: headlamp
+                name: oauth2-proxy
                 port:
                   number: 80

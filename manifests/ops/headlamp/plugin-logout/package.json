@@ -1,0 +1,8 @@
+{
+  "name": "logout",
+  "version": "1.0.1",
+  "description": "Botao Sair no app bar do Headlamp: encerra a sessao do oauth2-proxy (cookie) e a sessao SSO no Authentik.",
+  "devDependencies": {
+    "@kinvolk/headlamp-plugin": "^0.14.0"
+  }
+}
