@@ -1,0 +1,29 @@
+# Certificado do Grafana (grafana.lan), emitido pelo ClusterIssuer `local-ca`.
+#
+# Cert dedicado em vez do wildcard `*.lan`: os validadores rejeitam wildcard de
+# label unico (`.lan` e tratado como dominio apex), entao cada app .lan tem o
+# seu — mesmo padrao de argocd/headlamp/litellm.
+#
+# Este arquivo e a adocao de um recurso que ja existia no cluster criado fora do
+# git (kubectl apply cru, 08/09/2026), no mesmo padrao do blueprint do authentik:
+# o conteudo e identico ao que ja roda, aplicado com `kubectl apply -f`. A
+# Application do prometheus-stack aponta para o chart Helm de terceiros, nao
+# para este repo, entao nao ha kustomization para agrega-lo.
+#
+# Ele nao serve so para o Ingress: o secret `grafana-tls` que o cert-manager
+# emite a partir daqui carrega tambem o `ca.crt` da raiz do mkcert — e e esse
+# ca.crt que o pod do Grafana monta para confiar no authentik.lan no SSO
+# (ver o `tls_client_ca` nos values da Application, 02-application.yaml).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: grafana-tls
+  namespace: monitoring
+spec:
+  secretName: grafana-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: grafana.lan
+  dnsNames:
+    - grafana.lan

@@ -55,6 +55,11 @@ apply_env_secret platform authentik-config manifests/argocd/authentik/secrets/au
 apply_yaml_secret manifests/argocd/authentik/secrets/postgresql-auth.yaml
 # kube-prometheus-stack — admin do Grafana (chaves admin-user / admin-password)
 apply_yaml_secret manifests/argocd/prometheus-stack/secrets/grafana-admin.yaml
+# grafana — client OIDC do SSO (chaves GF_AUTH_GENERIC_OAUTH_CLIENT_ID/_SECRET,
+# consumidas pelo envFromSecret do chart). Os MESMOS valores estão em
+# authentik.env como GRAFANA_OIDC_* — o blueprint registra o client, o Grafana
+# o apresenta (uma credencial, dois secrets).
+apply_env_secret monitoring grafana-oidc manifests/argocd/prometheus-stack/secrets/grafana-oidc.env
 # litellm — env do proxy (OPENAI_API_KEY, LITELLM_SALT_KEY, PROXY_BASE_URL, OIDC)
 apply_env_secret platform litellm-env manifests/argocd/litellm/secrets/litellm.env
 # litellm — credenciais do PostgreSQL (chaves username / password)

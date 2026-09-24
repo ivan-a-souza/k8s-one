@@ -352,6 +352,7 @@ os Secrets via `existingSecret` — nunca contêm senha.
 | `authentik-config` | `platform` | `manifests/argocd/authentik/secrets/authentik.env` | `authentik.existingSecret` |
 | `authentik-postgresql-auth` | `platform` + `data` | `manifests/argocd/authentik/secrets/postgresql-auth.yaml` | role `authentik` no PostgreSQL (script de init, `data`) |
 | `grafana-admin` | `monitoring` | `manifests/argocd/prometheus-stack/secrets/grafana-admin.yaml` | `grafana.admin.existingSecret` |
+| `grafana-oidc` | `monitoring` | `manifests/argocd/prometheus-stack/secrets/grafana-oidc.env` | `grafana.envFromSecret` (env `GF_AUTH_GENERIC_OAUTH_*`) |
 | `litellm-env` | `platform` | `manifests/argocd/litellm/secrets/litellm.env` | `litellm.environmentSecrets` |
 | `litellm-db` | `platform` + `data` | `manifests/argocd/litellm/secrets/litellm-db.yaml` | `litellm.db.secret` + init do PostgreSQL (`data`) |
 | `litellm-masterkey` | `platform` | `manifests/argocd/litellm/secrets/litellm-masterkey.yaml` | `litellm.masterkeySecretName` |
@@ -668,9 +669,12 @@ k8s-one/
     │   │   └── secrets/                 # GITIGNORED (nunca commitar)
     │   │       └── postgres-superuser.yaml # senha do superusuário (postgres-password)
     │   ├── prometheus-stack/
-    │   │   ├── 02-application.yaml      # existingSecret: grafana-admin
+    │   │   ├── 02-application.yaml      # existingSecret: grafana-admin + SSO do authentik (grafana.ini)
+    │   │   ├── 03-certificate.yaml      # grafana-tls (grafana.lan) — kubectl apply -f
+    │   │   ├── 04-ingress.yaml          # grafana.lan -> Service do chart — kubectl apply -f
     │   │   └── secrets/
-    │   │       └── grafana-admin.yaml   # admin do Grafana (admin-user/admin-password)
+    │   │       ├── grafana-admin.yaml   # admin do Grafana (admin-user/admin-password)
+    │   │       └── grafana-oidc.env     # client OIDC do SSO (GF_AUTH_GENERIC_OAUTH_*)
     ├── postgres/                       # PostgreSQL 18 — instância compartilhada (manifestos próprios, deste repo)
     │   ├── 01-pvc.yaml                 # PVC postgres-data (5Gi, ceph-block)
     │   ├── 02-deployment.yaml          # postgres:18.6 (ns data)
@@ -844,7 +848,7 @@ Manifestos: `manifests/built-in/ceph/` (`06-dashboard-namespace.yaml`, `07-dashb
 
 ### Authentik (`authentik.lan`)
 
-Provedor de identidade em `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, cert mkcert `authentik-tls`). O banco é o **PostgreSQL 18 compartilhado do namespace `data`** (ver [PostgreSQL (data)](#postgresql-data) abaixo) — banco `authentik`, dono a role `authentik` — por isso o `postgresql:` embutido do chart está `enabled: false` e a conexão vem inteira do Secret `authentik-config` (`AUTHENTIK_POSTGRESQL__*`, entregue ao server e ao worker por `envFrom`). Está aqui para ser o **login único** dos apps do cluster; o único app ligado nele até agora é o LiteLLM.
+Provedor de identidade em `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, cert mkcert `authentik-tls`). O banco é o **PostgreSQL 18 compartilhado do namespace `data`** (ver [PostgreSQL (data)](#postgresql-data) abaixo) — banco `authentik`, dono a role `authentik` — por isso o `postgresql:` embutido do chart está `enabled: false` e a conexão vem inteira do Secret `authentik-config` (`AUTHENTIK_POSTGRESQL__*`, entregue ao server e ao worker por `envFrom`). Está aqui para ser o **login único** dos apps do cluster; ligados nele até agora: LiteLLM, Headlamp e Grafana.
 
 Grupos, providers e applications são **declarativos**, via um blueprint que o chart monta no worker:
 
@@ -853,7 +857,8 @@ kubectl apply -f manifests/argocd/authentik/03-blueprint.yaml    # o ConfigMap d
 kubectl apply -f manifests/argocd/authentik/02-application.yaml  # depois deixa o Argo CD sincronizar o chart
 ```
 
-- `manifests/argocd/authentik/03-blueprint.yaml` é um ConfigMap com o blueprint (`litellm-oidc.yaml`): grupo `litellm-users`, provider OAuth2 `LiteLLM`, a application e o binding do grupo.
+- `manifests/argocd/authentik/03-blueprint.yaml` é um ConfigMap com **três** blueprints, um por app: `litellm-oidc.yaml` (grupo `litellm-users`, provider OAuth2 `LiteLLM`, application e bindings), `headlamp-oidc.yaml` (idem, para o Headlamp — lá com o oauth2-proxy fazendo o fluxo) e `grafana-oidc.yaml` (idem, para o Grafana, que fala OIDC nativamente).
+- **Entrar e poder mexer são duas perguntas, com duas peças.** `litellm-users` + o binding da Application respondem *quem entra*; o *que pode fazer dentro* vem de um claim, não do grupo. Por isso o blueprint cria também o grupo `litellm-admins` (com binding próprio — sem ele um admin do LiteLLM seria admin de um app onde não consegue entrar) e um scope mapping `LiteLLM Role` (`scope_name: litellm_role`) que devolve `proxy_admin` para quem está nele e `internal_user_viewer` para o resto. O claim só chega no token se o scope estiver em `property_mappings` do provider **e** o client pedir no `scope=` do `/authorize` — o `/authorize` faz a **interseção** dos dois, então faltando um dos lados o claim não sai e não há erro nenhum (do lado do LiteLLM é a variável `GENERIC_SCOPE`; ver a seção dele abaixo).
 - É aplicado com **`kubectl`, nunca pelo Helm**: as tags do blueprint (`!Find`, `!KeyOf`, `!Env`) são YAML customizado, e o caminho `values → toYaml` do Helm as destrói (chegam no cluster como string solta e o blueprint falha).
 - O chart monta cada nome de `blueprints.configMaps` (no `02-application.yaml`) dentro do **worker**, em `/blueprints/mounted/cm-<nome>`; o worker descobre todo `*.yaml` de lá.
 - **A descoberta é por evento, não no boot.** Quem dispara é o watcher de arquivos (`on_created`/`on_modified`) mais uma rodada **de hora em hora**. Um ConfigMap que já está populado quando o worker sobe não gera evento nenhum — o mount acontece antes do processo existir. Para forçar sem esperar: mude os **dados** do ConfigMap (ex.: um comentário no blueprint) e o kubelet re-sincroniza o volume, gerando os eventos. `kubectl annotate` **não** serve: metadado não faz o kubelet re-sincronizar.
@@ -884,11 +889,13 @@ kubectl -n platform get secret litellm-masterkey -o jsonpath='{.data.masterkey}'
 curl -sk https://litellm.lan/v1/models -H "Authorization: Bearer $MASTER_KEY"
 ```
 
-**O login da UI é SSO pelo Authentik** (provider `LiteLLM`, ver a seção do Authentik acima). Redirect URI: `https://litellm.lan/sso/callback`; o acesso é restrito ao grupo `litellm-users`. A troca é toda por variável de ambiente:
+**O login da UI é SSO pelo Authentik** (provider `LiteLLM`, ver a seção do Authentik acima). Redirect URI: `https://litellm.lan/sso/callback`; o acesso é restrito aos grupos `litellm-users` e `litellm-admins`. A troca é toda por variável de ambiente:
 
 - As chaves são `GENERIC_*`, **não** `GOOGLE_*`. O LiteLLM escolhe o provedor num `if/elif` na ordem **Google → Microsoft → Generic**, então enquanto `GOOGLE_CLIENT_ID` existir o bloco genérico é código morto — remover as duas chaves do Google é o que de fato troca o provedor.
 - São três endpoints configurados à mão (`authorize`, `token`, `userinfo`): o LiteLLM **não** usa discovery de OIDC, não há consulta a `/.well-known`.
 - O `PROXY_BASE_URL` (`https://litellm.lan`) é quem compõe o redirect URI; tem que bater com o que está registrado no provider.
+- **O papel do usuário vem de um claim, não do grupo.** Entrar e poder mexer são perguntas diferentes: o grupo é o binding que deixa entrar (o Authentik), a role vem no claim `litellm_role` do userinfo (o LiteLLM). Sem role no token o LiteLLM **não** recusa o login — cai no default embutido dele, `internal_user_viewer` (UI em modo leitura), que era o que todo mundo ganhava, inclusive o admin, até 24/09/2026. Por isso as duas variáveis andam juntas: `GENERIC_USER_ROLE_ATTRIBUTE=litellm_role` diz qual campo ler, e `GENERIC_SCOPE=openid email profile litellm_role` faz o pedido que traz o claim. Os quatro valores válidos são exatos (`proxy_admin`, `proxy_admin_viewer`, `internal_user`, `internal_user_viewer`) — valor escrito errado não dá erro nenhum, só volta pro default.
+- **A role é regravada no banco a cada login de usuário que já existe** (`_build_sso_user_update_data`), não só na criação. Consequência prática: mudar a role pela UI do LiteLLM é temporário — o próximo login SSO sobrescreve com o que o IdP disser. A fonte da verdade é o grupo no Authentik.
 - A **master key não é afetada pelo SSO** — continua sendo o bearer token da API. Ela não é senha da UI: `POST /login` com `admin` + master key devolve 401 aqui.
 - Sem `LITELLM_LICENSE`, o SSO tem teto de **5 usuários** (o `ui_sso.py` recusa acima disso). A `LiteLLM_UserTable` começa vazia, então só importa se mais gente for logar.
 
@@ -903,6 +910,26 @@ Detalhes do deploy que importam antes de mexer:
 - **Métricas precisam do callback**: o `/metrics` só existe com `litellm_settings.callbacks: [prometheus]` — sem ele o LiteLLM devolve 404 e o target do Prometheus fica DOWN (o ServiceMonitor em si funciona: o scrape acontece). Com o callback ligado o endpoint também passa a exigir a API key, daí o `require_auth_for_metrics_endpoint: false` (o endpoint é ClusterIP).
 
 Manifestos: `manifests/argocd/litellm/`. Secrets: ver a tabela acima.
+
+### Grafana (`grafana.lan`)
+
+Métricas e dashboards do cluster: `kube-prometheus-stack` (chart 90.0.0, ns `monitoring`), com o Grafana `13.2.1-distroless`, PVC `ceph-block` de 10Gi e os sidecars de datasources/dashboards lendo ConfigMaps. Acessível em `https://grafana.lan` — Ingress `grafana` + Certificate `grafana-tls` (`manifests/argocd/prometheus-stack/03-certificate.yaml` e `04-ingress.yaml`, aplicados com `kubectl apply -f`, porque a Application aponta para o chart de terceiros e não para este repo).
+
+**SSO pelo Authentik** (provider `Grafana`, blueprint `grafana-oidc.yaml`). O Grafana fala OIDC **nativamente** — não tem proxy na frente como o Headlamp; o Authentik só entrega os claims:
+
+- Acesso pelo grupo **`grafana-users`** (binding da Application, um lugar só: o Grafana não usa `allowed_groups`).
+- **Papel por grupo**, com `role_attribute_path` (JMESPath): `grafana-admins` → `GrafanaAdmin`, o resto → `Viewer`. Diferente do LiteLLM, aqui **não** existe scope mapping próprio: o Grafana avalia o claim `groups`, e esse claim já vem do scope `profile` (que devolve a lista de grupos do usuário). O que o Grafana compara é o **nome do grupo**, então o mapeamento grupo→papel mora no `grafana.ini`, não no blueprint.
+- `role_attribute_strict = true`: se o claim `groups` faltar, o login é **negado** em vez de rebaixar todo mundo para `Viewer` em silêncio (é a lição do LiteLLM, que caía em `internal_user_viewer` sem avisar ninguém). `allow_assign_grafana_admin = true` é o que faz o `GrafanaAdmin` acima valer como admin **de servidor**; sem ela seria só Admin da organização.
+- A role é re-sincronizada a cada login: promover/rebaixar alguém é mexer no grupo no Authentik, não no Grafana.
+- O login local (`admin` + secret `grafana-admin`) **continua valendo** — é o break-glass (não passa pelo Authentik) e é com ele que os sidecars de dashboards falam com a API local.
+
+Três detalhes que custam caro se errados:
+
+- **`root_url` é obrigatório.** O `redirect_uri` do fluxo é derivado dele; sem `root_url`, o Grafana monta a URL a partir do `Host` do request (que chega como `http`, atrás do ingress) e o Authentik recusa por não bater com o `https://grafana.lan/login/generic_oauth` registrado no provider.
+- **A CA do mkcert entra montada, via `extraSecretMounts`.** O pod é distroless (sem shell) e roda com rootfs read-only, então não dá para concatenar um bundle como o LiteLLM faz: monta-se o `ca.crt` do próprio secret `grafana-tls` (todo secret tls do cert-manager carrega o `ca.crt` da emissora) e aponta-se `tls_client_ca` para ele — o equivalente Go do `--provider-ca-file` do oauth2-proxy. **Não** use `extraVolumes` para isso: o template do chart só renderiza `existingClaim`/`hostPath`/`csi`/`configMap`/`emptyDir` e um volume `secret:` cai silenciosamente em `emptyDir` vazio — o pod sobe, o arquivo não existe e o SSO falha só no login, longe da causa.
+- **A credencial não entra no `grafana.ini`.** O par client_id/secret vem do Secret `grafana-oidc` como env `GF_AUTH_GENERIC_OAUTH_*` (`envFromSecret`), que sobrepõe o ini — é o que o `assertNoLeakedSecrets` do chart confere no render.
+
+Manifestos: `manifests/argocd/prometheus-stack/`. Secrets: ver a tabela acima.
 
 ### PostgreSQL (data)
 

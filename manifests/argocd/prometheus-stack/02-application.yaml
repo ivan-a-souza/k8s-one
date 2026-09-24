@@ -44,8 +44,92 @@ spec:
         grafana:
           # Senha vem do Secret gitignored (secrets/grafana-admin.yaml),
           # criado por scripts/create-secrets.sh. Nunca embutir aqui.
+          # Continua valendo depois do SSO: é o login de emergência (não passa
+          # pelo authentik) e é com ele que os sidecars falam com a API local.
           admin:
             existingSecret: grafana-admin
+
+          # SSO pelo authentik (provider `Grafana` no blueprint 03-blueprint.yaml
+          # do authentik). O par client_id/client_secret NÃO está aqui: vem do
+          # Secret grafana-oidc (gitignored) como env GF_* — env var sobrepõe o
+          # grafana.ini, então a credencial nunca chega ao ConfigMap (é o que o
+          # `assertNoLeakedSecrets` do chart confere no render).
+          envFromSecret: grafana-oidc
+
+          # O pod é distroless e roda com rootfs read-only: não dá para
+          # concatenar um bundle de CA como o litellm faz (nem shell tem). A
+          # raiz do mkcert entra MONTADA — o secret grafana-tls, que o
+          # cert-manager já emite para o grafana.lan, carrega o ca.crt (todo
+          # secret tls do cert-manager carrega), como o litellm-tls.
+          #
+          # Tem que ser `extraSecretMounts`, NAO `extraVolumes`: o template do
+          # chart (templates/_pod.tpl) so sabe renderizar existingClaim,
+          # hostPath, csi, configMap e emptyDir — um volume `secret:` cai no
+          # else e vira emptyDir VAZIO, sem erro nenhum (o pod sobe e o
+          # tls_client_ca aponta para um arquivo que nao existe). O
+          # extraSecretMounts ja monta o volume e o mountPath de uma vez.
+          extraSecretMounts:
+            - name: mkcert-ca
+              mountPath: /etc/grafana/mkcert-ca
+              secretName: grafana-tls
+              # 0444 (o chart renderiza como inteiro; o default vazio viraria
+              # `defaultMode:` nulo). É certificado público — o sigilo é da
+              # chave, que fica no tls.key e não é montada (só o items abaixo).
+              defaultMode: 0444
+              readOnly: true
+              items:
+                - key: ca.crt
+                  path: ca.crt
+
+          # `grafana.ini` faz deep-merge com os defaults do chart (paths,
+          # analytics, unified_storage continuam lá). Mapa de mapa vira seção do
+          # ini; a chave com ponto vira `[auth.generic_oauth]`.
+          grafana.ini:
+            server:
+              # Obrigatório para o SSO: o redirect_uri do fluxo é derivado do
+              # root_url. Sem ele o Grafana monta a URL a partir do Host do
+              # request (http, atrás do ingress) e o authentik recusa por não
+              # bater com o registrado no provider.
+              root_url: https://grafana.lan/
+            auth.generic_oauth:
+              enabled: true
+              name: Authentik
+              # Quem entra é decidido no authentik (binding do grupo
+              # grafana-users); esta flag só permite criar a conta local no
+              # primeiro login.
+              allow_sign_up: true
+              scopes: openid profile email
+              auth_url: https://authentik.lan/application/o/authorize/
+              token_url: https://authentik.lan/application/o/token/
+              api_url: https://authentik.lan/application/o/userinfo/
+              # Confia na raiz do mkcert para falar com o authentik.lan — é o
+              # equivalente Go do `--provider-ca-file` que o oauth2-proxy do
+              # headlamp usa. Sem isso a troca de token morre em erro x509 (a
+              # imagem não conhece o mkcert). Em vez de tls_skip_verify_insecure,
+              # que aceitaria qualquer certificado.
+              tls_client_ca: /etc/grafana/mkcert-ca/ca.crt
+              # Sem isto o login do usuário vira o `sub` hasheado do authentik
+              # (sub_mode: hashed_user_id no provider). Os dois claims vêm do
+              # scope `profile`.
+              login_attribute_path: preferred_username
+              name_attribute_path: name
+              # O papel sai do GRUPO, não de um claim de role: o scope `profile`
+              # já devolve `groups`, e o Grafana avalia este JMESPath primeiro
+              # no ID token (include_claims_in_id_token no provider) — resolve
+              # de primeira, sem depender do userinfo.
+              role_attribute_path: "contains(groups, 'grafana-admins') && 'GrafanaAdmin' || 'Viewer'"
+              # Falha alta: se o claim `groups` faltar, o login é NEGADO em vez
+              # de rebaixar todo mundo para Viewer em silêncio — a lição do
+              # LiteLLM (que caía em internal_user_viewer sem avisar).
+              role_attribute_strict: true
+              # 'GrafanaAdmin' acima só vira admin DE SERVIDOR com esta flag;
+              # sem ela o resultado seria apenas Admin da organização.
+              allow_assign_grafana_admin: true
+              # Logout do Grafana encerra também a sessão no authentik (senão o
+              # próximo login volta direto, sem pedir senha). O caminho usa o
+              # slug da Application no blueprint.
+              signout_redirect_url: https://authentik.lan/application/o/grafana/end-session/
+
           resources:
             requests:
               memory: 256Mi
