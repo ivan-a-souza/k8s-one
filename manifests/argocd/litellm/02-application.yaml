@@ -45,17 +45,17 @@ spec:
           type: Recreate
 
         # Sem requests o pod fica BestEffort — primeiro candidato a eviction num
-        # nó apertado (74% de requests, 204% de overcommit nos limits).
-        # 1Gi NÃO basta: o proxy é OOMKilled (exit 137) poucos segundos depois de
-        # subir, carregando o pacote inteiro + o client do Prisma. O job de
-        # migrations, que faz menos, chegou a ~1,7Gi de pico.
+        # nó apertado. O proxy carrega o pacote inteiro + o client do Prisma:
+        # subia a ~1Gi residente e reiniciava (OOM em nó apertado).
+        # Aumentado em 24/09/2026: requests 1Gi / limits 3Gi, pra dar folga.
+        # O job de migrations, que faz menos, chegou a ~1,7Gi de pico.
         resources:
           requests:
-            cpu: 100m
-            memory: 512Mi
+            cpu: 250m
+            memory: 1Gi
           limits:
-            cpu: "1"
-            memory: 2Gi
+            cpu: "2"
+            memory: 3Gi
 
         # Banco: a instância PostgreSQL compartilhada do ns data
         # (manifests/postgres/). A mesma instância serve o Authentik, em banco
