@@ -1,7 +1,0 @@
-# Ceph Dashboard — interface web do cluster Ceph (Rook)
-# Acesso: https://ceph.lan (TLS mkcert *.lan; rewrite AdGuard -> 192.168.1.20)
-# Autenticação: login admin do Ceph (secret rook-ceph-dashboard-password).
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ceph-dashboard

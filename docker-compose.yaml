@@ -10,8 +10,6 @@ services:
     cgroup: host
     environment:
       ARGOCD_VERSION: "${ARGOCD_VERSION:-v3.5.1}"
-      # rbd-nbd orphan reaper: 1 = dry-run (default, só loga), 0 = desmapeia.
-      RBD_REAPER_DRY_RUN: "${RBD_REAPER_DRY_RUN:-1}"
     tmpfs:
       - /run
       - /tmp
@@ -25,10 +23,8 @@ services:
       - ./data/kubernetes:/etc/kubernetes
       # local-path-provisioner: volumes provisionados vivem aqui. SEM este bind
       # mount, recriar o container apaga os PVs (o path fica na camada gravável
-      # efêmera do container). É o storage default desde a saída do Ceph.
+      # efêmera do container). É o StorageClass default do cluster.
       - ./data/local-path:/opt/local-path-provisioner
-      # TODO(migração local-path): remover o mount do Rook após a purga do Ceph.
-      - ./data/rook:/var/lib/rook
       - ./data/tiles:/var/lib/tiles
       - ./manifests/built-in:/opt/manifests/built-in:ro
       - ./manifests/apps:/opt/manifests/apps:ro
@@ -54,7 +50,8 @@ services:
       # LAN/tailnet continua sendo dentro do cluster, via Service.
       - "127.0.0.1:5432:30432"
     restart: unless-stopped
-    # PID 1 drains PVC consumers and detaches RBD/CephFS before stopping Ceph.
+    # Grace period for the ordered shutdown (PID 1 lets the kubelet terminate
+    # PVC consumers — postgres/vaultwarden — before stopping containerd).
     stop_grace_period: 5m
     networks:
       default:

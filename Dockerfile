@@ -10,7 +10,6 @@ ARG RUNC_VERSION=v1.2.6
 ARG CNI_VERSION=v1.6.2
 ARG CILIUM_VERSION=v1.19.5
 ARG CILIUM_CLI_VERSION=v0.19.4
-ARG ROOK_VERSION=v1.20.3
 ARG TARGETARCH=amd64
 
 # ===========================================================================
@@ -19,7 +18,7 @@ ARG TARGETARCH=amd64
 FROM alpine:3.21 AS builder
 
 ARG KUBE_VERSION ETCD_VERSION CONTAINERD_VERSION RUNC_VERSION CNI_VERSION
-ARG CILIUM_VERSION CILIUM_CLI_VERSION ROOK_VERSION TARGETARCH
+ARG CILIUM_VERSION CILIUM_CLI_VERSION TARGETARCH
 
 RUN apk add --no-cache curl tar gzip
 
@@ -54,27 +53,14 @@ RUN mkdir -p /build/cni && \
     tar xz -C /build/cni/
 
 # ── Cilium CLI ────────────────────────────────────────────────────────────
-RUN mkdir -p /build/manifests && \
-    curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${TARGETARCH}.tar.gz" | \
+RUN curl -fsSL "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${TARGETARCH}.tar.gz" | \
     tar xz -C /build/bin/ && \
     chmod +x /build/bin/cilium
-
-# ── Manifests ─────────────────────────────────────────────────────────────
-# Rook-Ceph operator manifests (crds, common, csi-operator, operator)
-RUN for f in crds.yaml common.yaml csi-operator.yaml operator.yaml; do \
-      curl -fsSL "https://raw.githubusercontent.com/rook/rook/${ROOK_VERSION}/deploy/examples/${f}" \
-        -o "/build/manifests/rook-${f}"; \
-    done && \
-    curl -fsSL "https://raw.githubusercontent.com/rook/rook/${ROOK_VERSION}/deploy/examples/cluster-test.yaml" \
-      -o /build/manifests/rook-cluster-test.yaml && \
-    ls -la /build/manifests/
 
 # ===========================================================================
 # Stage 2: Runtime — minimal Debian slim
 # ===========================================================================
 FROM debian:bookworm-slim AS runtime
-
-ARG ROOK_VERSION
 
 # Install ONLY essential runtime dependencies
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
@@ -88,7 +74,6 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
       findutils \
       curl \
       ca-certificates \
-      udev \
     && \
     # Strip: remove package manager, docs, caches
     rm -rf /var/lib/apt/lists/* \
@@ -116,18 +101,12 @@ COPY --from=builder /build/bin/cilium                  /usr/local/bin/
 # ── CNI plugins ───────────────────────────────────────────────────────────
 COPY --from=builder /build/cni/ /opt/cni/bin/
 
-# ── Manifests ─────────────────────────────────────────────────────────────
-# Somente os manifests do Rook (baixados no build) são assados na imagem.
-# Os manifests custom (coredns, haproxy, ceph, apps) são
-# montados via volume no docker-compose (./manifests:/opt/manifests/...) —
-# NÃO devem ser COPYados aqui (são gitignored e mudam sem rebuild).
-COPY --from=builder /build/manifests/ /opt/manifests/
-
 # ── Configs & scripts ─────────────────────────────────────────────────────
+# Os manifests (built-in, apps, networking, ...) NÃO são assados na imagem:
+# são montados via volume no docker-compose em /opt/manifests/<domínio>.
 COPY configs/containerd-config.toml /etc/containerd/config.toml
 COPY scripts/entrypoint.sh /scripts/entrypoint.sh
-COPY scripts/rbd-nbd-reaper.sh /usr/local/bin/rbd-nbd-reaper.sh
-RUN chmod +x /scripts/entrypoint.sh /usr/local/bin/rbd-nbd-reaper.sh
+RUN chmod +x /scripts/entrypoint.sh
 
 # ── Create required directories ──────────────────────────────────────────
 RUN mkdir -p \
@@ -139,7 +118,6 @@ RUN mkdir -p \
       /var/log/containers \
       /etc/kubernetes/pki/etcd \
       /etc/cni/net.d \
-      /var/lib/rook \
       /run/containerd
 
 EXPOSE 6443
