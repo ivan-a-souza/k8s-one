@@ -5,8 +5,8 @@ metadata:
   namespace: networking
 spec:
   accessModes:
-    - ReadWriteMany
-  storageClassName: cephfs
+    - ReadWriteOnce
+  storageClassName: local-path
   resources:
     requests:
       storage: 2Gi

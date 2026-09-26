@@ -5,8 +5,8 @@
 # de provisionamento, entra um banco so.
 #
 # 5Gi e o tamanho honesto: o banco do authentik ocupa ~126MB e o do litellm
-# esta vazio. O storageClass ceph-block tem allowVolumeExpansion=true, entao
-# crescer depois e online (sem recriar o volume nem parar o banco).
+# esta vazio. O storageClass local-path NAO suporta expansao online (ele nao
+# tem allowVolumeExpansion): crescer exige recriar o volume e restaurar o dump.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -22,7 +22,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: ceph-block
+  storageClassName: local-path
   resources:
     requests:
       storage: 5Gi

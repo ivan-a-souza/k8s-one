@@ -52,52 +52,6 @@ stop_pid() {
   fi
 }
 
-storage_mounts_active() {
-  # RBD-backed filesystems and CephFS mounts must disappear before the Ceph
-  # pods are stopped. Otherwise krbd/ceph can remain blocked in the kernel and
-  # prevent the outer Docker container from being recreated.
-  findmnt -rn -o SOURCE,FSTYPE,TARGET 2>/dev/null | awk '
-    $1 ~ /^\/dev\/rbd/ || $2 == "ceph" || $2 == "fuse.ceph" { found=1 }
-    END { exit !found }
-  '
-}
-
-stop_storage_consumers() {
-  if ! kubectl --kubeconfig="$KUBE/admin.conf" get --raw=/readyz >/dev/null 2>&1; then
-    log "API unavailable; skipping Kubernetes storage drain."
-    return 0
-  fi
-
-  local kc="kubectl --kubeconfig=$KUBE/admin.conf"
-  log "Cordoning $NODE_NAME and stopping pods that use PVCs..."
-  $kc cordon "$NODE_NAME" >/dev/null 2>&1 || true
-
-  local -A consumers=()
-  local namespace pod claim key
-  while IFS=$'\t' read -r namespace pod claim; do
-    [ -n "${namespace:-}" ] && [ -n "${pod:-}" ] && [ -n "${claim:-}" ] || continue
-    consumers["$namespace/$pod"]+="$claim,"
-  done < <($kc get pods -A -o go-template='{{range .items}}{{ $namespace := .metadata.namespace }}{{ $pod := .metadata.name }}{{range .spec.volumes}}{{if .persistentVolumeClaim}}{{printf "%s\t%s\t%s\n" $namespace $pod .persistentVolumeClaim.claimName}}{{end}}{{end}}{{end}}' 2>/dev/null || true)
-
-  for key in "${!consumers[@]}"; do
-    namespace=${key%%/*}
-    pod=${key#*/}
-    log "Stopping storage consumer $key (PVC: ${consumers[$key]%,})"
-    $kc -n "$namespace" delete pod "$pod" --grace-period=30 --wait=false >/dev/null 2>&1 || true
-  done
-
-  local tries=120
-  while [ "$tries" -gt 0 ]; do
-    if ! storage_mounts_active && ! compgen -G '/sys/bus/rbd/devices/*' >/dev/null; then
-      log "RBD and CephFS volumes are cleanly detached."
-      return 0
-    fi
-    sleep 1
-    tries=$((tries - 1))
-  done
-  log "WARNING: storage mounts did not detach within 120s; continuing shutdown."
-}
-
 stop_containerd_tasks() {
   local -a tasks=()
   mapfile -t tasks < <(ctr -n k8s.io tasks list -q 2>/dev/null || true)
@@ -137,9 +91,9 @@ cleanup() {
   stop_pid "kube-scheduler" "$SCHEDULER_PID" 10
   stop_pid "kube-controller-manager" "$CONTROLLER_MANAGER_PID" 10
 
-  # Keep kubelet, the API and Ceph alive until every application volume has
-  # been unpublished by CSI.
-  stop_storage_consumers
+  # Graceful pod termination (postgres/vaultwarden preStop hooks) is handled
+  # by the kubelet via SIGTERM; local-path volumes are hostPath, so there is no
+  # remote storage to detach before the runtime stops.
   stop_pid "kubelet" "$KUBELET_PID" 20
   stop_pid "kube-proxy" "$KUBE_PROXY_PID" 10
   stop_containerd_tasks
@@ -148,7 +102,6 @@ cleanup() {
   stop_pid "kube-apiserver" "$APISERVER_PID" 20
   stop_pid "etcd" "$ETCD_PID" 20
   stop_pid "containerd" "$CONTAINERD_PID" 20
-  losetup -d /dev/loop0 2>/dev/null || true
 
   log "Ordered cluster shutdown complete."
   exit 0
@@ -165,9 +118,8 @@ setup_mounts() {
   fi
 
   # Docker hands the container a plain tmpfs /dev, which does NOT auto-create
-  # device nodes for kernel block devices (e.g. /dev/nbdN for the rbd-nbd
-  # mounter, /dev/rbdN for krbd). Mounting devtmpfs makes the kernel create
-  # them instantly (and also exposes loop devices for the Ceph OSD).
+  # device nodes for kernel block devices. Mounting devtmpfs makes the kernel
+  # create them instantly.
   if ! grep -q ' /dev devtmpfs ' /proc/self/mounts 2>/dev/null; then
     if mount -t devtmpfs devtmpfs /dev 2>/dev/null; then
       log "devtmpfs mounted on /dev."
@@ -177,16 +129,9 @@ setup_mounts() {
       ln -sf fd/1 /dev/stdout 2>/dev/null || true
       ln -sf fd/2 /dev/stderr 2>/dev/null || true
     else
-      log "WARNING: could not mount devtmpfs on /dev (RBD mounts may fail)"
+      log "WARNING: could not mount devtmpfs on /dev"
     fi
   fi
-
-  # Loop devices are registered lazily by the kernel; ensure the nodes exist
-  # so `losetup /dev/loop0` in setup_ceph_osd_loop never fails.
-  for i in 0 1 2 3 4 5 6 7; do
-    [ -e "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i" 2>/dev/null || true
-  done
-  [ -e /dev/loop-control ] || mknod /dev/loop-control c 10 237 2>/dev/null || true
 
   log "Mount propagation configured."
 }
@@ -592,142 +537,6 @@ start_kube_proxy() {
   log "kube-proxy started."
 }
 
-# ── Setup loop device for Ceph OSD ────────────────────────────────────────
-# Creates a 30G sparse file in /var/lib/rook and attaches it as a loop device
-# so the Rook OSD has a raw block device without touching host disks.
-setup_ceph_osd_loop() {
-  local img="/var/lib/rook/osd.img"
-  local size="${ROOK_OSD_SIZE:-30G}"
-
-  if ! command -v losetup >/dev/null 2>&1; then
-    log "WARNING: losetup not found, skipping OSD loop device"
-    return 0
-  fi
-
-  mkdir -p /var/lib/rook
-
-  # Create sparse image if missing
-  if [ ! -f "$img" ]; then
-    log "Creating OSD sparse image ($size)..."
-    truncate -s "$size" "$img"
-  fi
-
-  # The rook manifest declares the OSD device EXCLUSIVELY as /dev/loop0
-  # (devicePathFilter + devices[].name=loop0). If osd.img ends up attached to
-  # any OTHER loop device, the OSD silently never finds its disk and stays in
-  # Init:CrashLoopBackOff ("no disk found with OSD ID 0"). Enforce loop0.
-  # NOTE: compare by INODE (losetup -j), never by backing-file string — the
-  # kernel may report the path differently than $img (e.g. "/osd.img").
-
-  # 1. Which loop device is backing osd.img right now?
-  local cur=""
-  cur=$(losetup -j "$img" 2>/dev/null | cut -d: -f1 | head -1) || true
-
-  # 2. If osd.img is on a different loop device, detach it first.
-  if [ -n "$cur" ] && [ "$cur" != "/dev/loop0" ]; then
-    log "osd.img attached to $cur — moving to /dev/loop0..."
-    losetup -d "$cur" 2>/dev/null || true
-    cur=""
-  fi
-
-  # 3. If /dev/loop0 is busy with a DIFFERENT file, detach it.
-  if losetup -a 2>/dev/null | grep -q '^/dev/loop0:'; then
-    if [ "$cur" != "/dev/loop0" ]; then
-      log "Detaching /dev/loop0 (occupied by another file)..."
-      losetup -d /dev/loop0 2>/dev/null || true
-    fi
-  fi
-
-  # 4. Attach if /dev/loop0 is not backing osd.img (inode check).
-  if ! losetup -j "$img" 2>/dev/null | grep -q '^/dev/loop0:'; then
-    log "Attaching /dev/loop0 to $img..."
-    if ! losetup /dev/loop0 "$img" 2>&1; then
-      die "FATAL: cannot attach /dev/loop0 to $img (device busy with another file?)"
-    fi
-  fi
-
-  # 5. Verify the attach REALLY happened and points at loop0.
-  if losetup -j "$img" 2>/dev/null | grep -q '^/dev/loop0:'; then
-    log "OSD loop device ready (/dev/loop0 -> $img)"
-  else
-    die "FATAL: OSD loop device NOT attached to /dev/loop0"
-  fi
-}
-
-# ── Wait for Ceph OSD ────────────────────────────────────────────────────
-# After the CephCluster manifest is applied, the Rook operator creates the
-# OSD pod. Wait for it to be Ready; if it crash-loops (init "activate" can't
-# find the disk), re-attach the loop backing and force-restart the pod.
-wait_for_ceph_osd() {
-  local kc="kubectl"
-  local tries=150   # ~5 min
-  log "Waiting for Ceph OSD to become Ready..."
-  while [ $tries -gt 0 ]; do
-    local osd_pod osd_ready osd_restarts
-    osd_pod=$($kc -n rook-ceph get pods -l app=rook-ceph-osd \
-      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-    if [ -n "$osd_pod" ]; then
-      osd_ready=$($kc -n rook-ceph get pod "$osd_pod" \
-        -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo "")
-      if [ "$osd_ready" = "true" ]; then
-        log "Ceph OSD is Ready ($osd_pod)."
-        return 0
-      fi
-      osd_restarts=$($kc -n rook-ceph get pod "$osd_pod" \
-        -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)
-      if [ "${osd_restarts:-0}" -ge 4 ]; then
-        log "OSD $osd_pod crash-looping ($osd_restarts restarts) — re-attaching loop0 and restarting pod..."
-        setup_ceph_osd_loop
-        $kc -n rook-ceph delete pod "$osd_pod" --force --grace-period=0 2>/dev/null || true
-      fi
-    fi
-    sleep 2; tries=$((tries - 1))
-  done
-  log "WARNING: Ceph OSD did not become Ready in time (boot continues)."
-  return 1
-}
-
-# ── Start udevd (required by ceph-volume for device identification) ───────
-start_udevd() {
-  if command -v /usr/lib/systemd/systemd-udevd >/dev/null 2>&1; then
-    local udevd=/usr/lib/systemd/systemd-udevd
-  elif command -v /sbin/udevd >/dev/null 2>&1; then
-    local udevd=/sbin/udevd
-  elif command -v udevd >/dev/null 2>&1; then
-    local udevd=udevd
-  else
-    log "WARNING: udevd not found, Ceph OSD may fail to detect devices"
-    return 0
-  fi
-
-  # Start udevd if not already running (comm is "systemd-udevd")
-  if ! grep -q systemd-udevd /proc/*/comm 2>/dev/null; then
-    log "Starting udevd..."
-    rm -rf /run/udev; mkdir -p /run/udev
-    # Fake systemctl so udevd doesn't try to talk to systemd
-    if [ ! -f /bin/systemctl ]; then
-      cat > /bin/systemctl << 'SYSTEMCTL'
-#!/bin/sh
-exit 0
-SYSTEMCTL
-      chmod +x /bin/systemctl
-    fi
-    "$udevd" --resolve-names=never --daemon 2>/dev/null || "$udevd" --daemon 2>/dev/null
-    sleep 2
-    if grep -q systemd-udevd /proc/*/comm 2>/dev/null; then
-      log "udevd started OK"
-    else
-      log "WARNING: udevd failed to start"
-    fi
-  fi
-
-  # Trigger uevents so /run/udev/data gets populated for the loop device
-  if command -v udevadm >/dev/null 2>&1; then
-    udevadm trigger --action=add --subsystem-match=block 2>/dev/null || true
-    udevadm settle --timeout=10 2>/dev/null || true
-  fi
-}
-
 # ── Cilium CNI health check ──────────────────────────────────────────────
 # Returns 0 only when the CNI is actually serving NEW pods. Three layers:
 #   1. DaemonSet exists with desired == ready
@@ -830,28 +639,6 @@ cleanup_stale_state() {
       $kc delete volumeattachment "$va" 2>/dev/null || true
     fi
   done
-}
-
-# ── Start the rbd-nbd orphan reaper ───────────────────────────────────────
-# The ceph-block StorageClass uses mounter=rbd-nbd (krbd can't reach the mon
-# from inside the container). Stale rbd-nbd mappings can survive pod/plugin
-# restarts and leave PVCs stuck in ContainerCreating ("is still being used" /
-# "cookie mismatch"). The reaper unmaps mappings whose volumeHandle has no
-# VolumeAttachment in Attached=true state for this node. Dry-run by default;
-# set RBD_REAPER_DRY_RUN=0 to actually unmap.
-start_rbd_reaper() {
-  [ -x /usr/local/bin/rbd-nbd-reaper.sh ] || { log "WARNING: rbd-nbd-reaper.sh not found"; return 0; }
-  # comm is truncated to 15 chars: "rbd-nbd-reaper"
-  if grep -q rbd-nbd-reaper /proc/*/comm 2>/dev/null; then
-    log "rbd-nbd reaper already running."
-    return 0
-  fi
-  log "Starting rbd-nbd reaper (dry_run=${RBD_REAPER_DRY_RUN:-1})..."
-  KUBECONFIG="$KUBE/admin.conf" NODE_NAME="$NODE_NAME" \
-    /usr/local/bin/rbd-nbd-reaper.sh >/tmp/rbd-reaper.out 2>&1 &
-  sleep 1
-  grep -q rbd-nbd-reaper /proc/*/comm 2>/dev/null && log "rbd-nbd reaper started." \
-    || log "WARNING: rbd-nbd reaper failed to start"
 }
 
 # ── Post-init: apply manifests ────────────────────────────────────────────
@@ -977,51 +764,14 @@ apply_manifests() {
   $kc apply -f "$MANIFESTS/built-in/coredns" 2>&1 | tail -6
   log "CoreDNS applied."
 
-  # Deploy Rook-Ceph operator
-  log "Deploying Rook-Ceph operator..."
-  $kc apply -f "$MANIFESTS/rook-crds.yaml" 2>&1 | tail -2
-  $kc apply -f "$MANIFESTS/rook-common.yaml" 2>&1 | tail -2
-  $kc apply -f "$MANIFESTS/rook-csi-operator.yaml" 2>&1 | tail -2
-
-  # Wait for rook-ceph namespace to exist
-  local rook_tries=60
-  while [ $rook_tries -gt 0 ]; do
-    $kc get ns rook-ceph >/dev/null 2>&1 && break
-    sleep 2; rook_tries=$((rook_tries - 2))
-  done
-
-  $kc apply -f "$MANIFESTS/rook-operator.yaml" 2>&1 | tail -2
-
-  # Allow loop devices for OSD storage (required for the 30G loop device).
-  # NOTE: must run AFTER applying rook-operator.yaml, since that manifest ships
-  # its own rook-ceph-operator-config with ROOK_CEPH_ALLOW_LOOP_DEVICES=false.
-  $kc -n rook-ceph create configmap rook-ceph-operator-config \
-    --from-literal=ROOK_CEPH_ALLOW_LOOP_DEVICES=true 2>/dev/null || \
-    $kc -n rook-ceph patch configmap rook-ceph-operator-config --type merge \
-      -p '{"data":{"ROOK_CEPH_ALLOW_LOOP_DEVICES":"true"}}' 2>/dev/null
-
-  # Verify the operator config actually has loop devices enabled. A silent
-  # failure here means the OSD can never be created (default is false), which
-  # is exactly the class of bug that left the cluster with 0 OSDs before.
-  if [ "$($kc -n rook-ceph get configmap rook-ceph-operator-config \
-        -o jsonpath='{.data.ROOK_CEPH_ALLOW_LOOP_DEVICES}' 2>/dev/null)" != "true" ]; then
-    die "FATAL: ROOK_CEPH_ALLOW_LOOP_DEVICES is not 'true' in rook-ceph-operator-config"
-  fi
-  log "ROOK_CEPH_ALLOW_LOOP_DEVICES=true confirmed"
-
-  log "Waiting for Rook operator..."
-  $kc -n rook-ceph rollout status deploy/rook-ceph-operator --timeout=300s 2>&1 | tail -2
-  log "Rook operator deployed."
-
-  # Create Ceph cluster, storage resources and dashboard.
-  log "Creating Ceph cluster (single-node, loop OSD) and dashboard..."
-  $kc apply -k "$MANIFESTS/built-in/ceph" 2>&1 | tail -9
-  log "Ceph manifests applied (operator will reconcile the cluster)."
-
-  # Idempotent OSD recovery: wait for the OSD to be Ready; if it crash-loops
-  # (loop backing lost after a container restart), re-attach /dev/loop0 and
-  # force-restart the pod automatically.
-  wait_for_ceph_osd
+  # Apply local-path-provisioner (default StorageClass). It replaced Rook-Ceph:
+  # in a single-node cluster the Ceph daemons (mon/mgr/osd/mds/CSI) consumed
+  # ~2GiB of requests and were prone to the nbd/OSD deadlock. local-path
+  # provisions hostPath volumes under /opt/local-path-provisioner, persisted on
+  # the host by the ./data/local-path bind mount in docker-compose.yaml.
+  log "Applying local-path-provisioner..."
+  $kc apply -k "$MANIFESTS/built-in/local-path" 2>&1 | tail -9
+  log "local-path-provisioner applied."
 
   # Apply HAProxy Ingress Controller
   log "Applying HAProxy Ingress Controller..."
@@ -1089,9 +839,6 @@ apply_manifests() {
   done
   log "Stale-state cleanup finished."
 
-  # Start the rbd-nbd orphan reaper (dry-run unless RBD_REAPER_DRY_RUN=0)
-  start_rbd_reaper
-
   log "============================================="
   log "  K8s-One cluster is READY!"
   log "  API Server: https://$NODE_IP:$API_PORT"
@@ -1106,11 +853,6 @@ main() {
   detect_ip
   generate_pki
   generate_kubeconfigs
-
-  # Storage prerequisites must exist before kubelet can revive persisted Rook
-  # and CSI pods from containerd state.
-  setup_ceph_osd_loop
-  start_udevd
 
   start_containerd
   cleanup_orphaned_containerd_records

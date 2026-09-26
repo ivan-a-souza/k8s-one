@@ -23,6 +23,11 @@ services:
       - ./data/kubelet:/var/lib/kubelet
       - ./data/pki:/etc/kubernetes/pki
       - ./data/kubernetes:/etc/kubernetes
+      # local-path-provisioner: volumes provisionados vivem aqui. SEM este bind
+      # mount, recriar o container apaga os PVs (o path fica na camada gravável
+      # efêmera do container). É o storage default desde a saída do Ceph.
+      - ./data/local-path:/opt/local-path-provisioner
+      # TODO(migração local-path): remover o mount do Rook após a purga do Ceph.
       - ./data/rook:/var/lib/rook
       - ./data/tiles:/var/lib/tiles
       - ./manifests/built-in:/opt/manifests/built-in:ro

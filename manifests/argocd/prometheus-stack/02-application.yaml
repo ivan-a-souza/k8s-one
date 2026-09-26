@@ -14,7 +14,7 @@ spec:
     helm:
       releaseName: kube-prometheus-stack
       values: |
-        # Ajustes para single-node k8s-one (23GB RAM host, ceph-block default)
+        # Ajustes para single-node k8s-one (23GB RAM host, local-path default)
         prometheus:
           prometheusSpec:
             replicas: 1
@@ -27,7 +27,7 @@ spec:
             storageSpec:
               volumeClaimTemplate:
                 spec:
-                  storageClassName: ceph-block
+                  storageClassName: local-path
                   accessModes: ["ReadWriteOnce"]
                   resources:
                     requests:
@@ -137,7 +137,7 @@ spec:
               memory: 512Mi
           persistence:
             enabled: true
-            storageClassName: ceph-block
+            storageClassName: local-path
             accessModes: ["ReadWriteOnce"]
             size: 10Gi
           service:

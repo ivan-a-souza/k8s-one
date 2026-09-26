@@ -12,8 +12,8 @@ metadata:
 #   - regra 1: leitura + escrita em TODOS os recursos, sem delete;
 #   - regra 2: delete liberado apenas nos recursos de trabalho.
 # namespaces, persistentvolumes e persistentvolumeclaims ficam de fora da
-# regra 2 (delete de PVC no ceph-block destroi os dados do PV). A lista da
-# regra 2 cresce conforme a necessidade.
+# regra 2 (o reclaimPolicy Delete dos StorageClasses destroi os dados do PV).
+# A lista da regra 2 cresce conforme a necessidade.
 rules:
   # Leitura + escrita em tudo, sem delete.
   - apiGroups:
