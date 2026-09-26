@@ -21,7 +21,7 @@ Empacotado numa **imagem mínima baseada em Debian** via multi-stage build (sem 
 │  └──────────┘  └──────────┘                      │
 │                                                  │
 │  CNI: Cilium  │  DNS: CoreDNS                    │
-│  Storage: Rook-Ceph (RBD + CephFS)               │
+│  Storage: local-path-provisioner (hostPath)      │
 │  Ingress: HAProxy (Portas host 8082/8443)        │
 │  Metrics: metrics-server (API metrics.k8s.io)    │
 └──────────────────────────────────────────────────┘
@@ -95,10 +95,7 @@ NAMESPACE            NAME                                       READY   STATUS
 kube-system          cilium-operator-...                          1/1     Running
 kube-system          cilium-...                                   1/1     Running
 kube-system          coredns-...                                 1/1     Running
-rook-ceph            rook-ceph-operator-...                       1/1     Running
-rook-ceph            rook-ceph-mon-a-...                          1/1     Running
-rook-ceph            rook-ceph-mgr-a-...                          1/1     Running
-rook-ceph            rook-ceph-osd-0-...                          1/1     Running
+local-path-storage   local-path-provisioner-...                   1/1     Running
 haproxy-controller   haproxy-kubernetes-ingress-...               1/1     Running
 ```
 
@@ -123,9 +120,7 @@ Todos os binários são baixados de fontes oficiais no build. Nenhum componente 
 | **Cilium** | v1.19.5 | github.com/cilium/cilium | CNI — networking + network policy (eBPF) |
 | **Cilium CLI** | v0.19.4 | github.com/cilium/cilium-cli | Instalação & gerenciamento do Cilium |
 | **CoreDNS** | v1.12.0 | registry.k8s.io | DNS do cluster |
-| **Rook** | v1.20.3 | github.com/rook/rook | Operador do Ceph (CRDs, operator, CSI) |
-| **Ceph** | v20.2.2 | quay.io/ceph/ceph | Daemons de storage (mon, mgr, osd, mds) |
-| **Ceph CSI** | v3.17.0 | quay.io/cephcsi | Drivers CSI (RBD block + CephFS) |
+| **local-path-provisioner** | v0.0.30 | github.com/rancher/local-path-provisioner | Provisionamento dinâmico via hostPath (StorageClass default) |
 | **HAProxy Ingress** | pinado por digest | haproxytech/kubernetes-ingress | Ingress Controller (HAProxy 3.2.21) |
 | **metrics-server** | v0.9.0 (pinado por digest) | registry.k8s.io | API metrics.k8s.io — kubectl top / HPA |
 
@@ -141,7 +136,6 @@ Todos os binários são baixados de fontes oficiais no build. Nenhum componente 
 │                                     │
 │  • curl, tar, gzip                  │
 │  • Download de todos os binários    │
-│  • Download dos manifests do Rook   │
 │  • Descartado no build final        │
 └──────────────┬──────────────────────┘
                │ COPY binários
@@ -149,8 +143,8 @@ Todos os binários são baixados de fontes oficiais no build. Nenhum componente 
 ┌─────────────────────────────────────┐
 │  Stage 2: Runtime (debian:bookworm) │
 │                                     │
-│  • bash, openssl, iptables, udev    │
-│  • losetup, socat, conntrack        │
+│  • bash, openssl, iptables          │
+│  • socat, conntrack                 │
 │  • apt/dpkg removidos no build      │
 │  • = imagem mínima, sem pkg manager │
 └─────────────────────────────────────┘
@@ -160,7 +154,7 @@ A imagem final **não possui package manager** — `apt`/`dpkg` são removidos a
 
 ### Processo de Inicialização
 
-O `entrypoint.sh` orquestra os processos do control-plane, o loop device do OSD do Ceph e a aplicação dos manifests:
+O `entrypoint.sh` orquestra os processos do control-plane e a aplicação dos manifests:
 
 ```
 entrypoint.sh
@@ -177,17 +171,12 @@ entrypoint.sh
 ├── kubelet
 ├── kube-proxy
 │
-├── setup_ceph_osd_loop() # cria/attach /dev/loop0 ← osd.img (30G sparse)
-├── start_udevd()         # udev + watcher de device-nodes RBD
-│
 └── apply_manifests() [background]
     ├── taint removal (permite workloads)
     ├── cilium install (CNI, reinstalação limpa a cada boot)
     ├── aguarda Node Ready
     ├── kubectl apply -f coredns/
-    ├── kubectl apply rook CRDs + common + CSI operator + operator
-    ├── patch ROOK_CEPH_ALLOW_LOOP_DEVICES=true (verificado)
-    ├── kubectl apply -k ceph/ (cluster Ceph + pools + SC + dashboard)
+    ├── kubectl apply -k local-path/ (provisioner + StorageClass default)
     ├── kubectl apply -f haproxy-ingress/
     └── kubectl apply -f metrics-server/
 ```
@@ -205,7 +194,7 @@ Todo o estado do cluster é armazenado em **bind mounts** em `./data/`, garantin
 | `./data/kubelet/` | `/var/lib/kubelet` | Estado do kubelet e pods |
 | `./data/pki/` | `/etc/kubernetes/pki` | Certificados TLS (CAs, certs, keys) |
 | `./data/kubernetes/` | `/etc/kubernetes` | Kubeconfigs (admin, scheduler, etc.) |
-| `./data/rook/` | `/var/lib/rook` | Dados do Ceph: imagem OSD + keyrings |
+| `./data/local-path/` | `/opt/local-path-provisioner` | Volumes provisionados pela StorageClass `local-path` |
 
 Além dos bind mounts, o container monta paths do sistema host:
 
@@ -214,13 +203,13 @@ Além dos bind mounts, o container monta paths do sistema host:
 | `/sys` | `/sys` | `rw` | Cilium BPF, cgroups |
 | `/lib/modules` | `/lib/modules` | `ro` | Módulos do kernel (iptables, etc.) |
 
-> ⚠️ `./data/` e `./data/rook/` contêm segredos do cluster (keyrings do Ceph, chaves privadas da PKI, kubeconfigs). Ambos estão **gitignored** — nunca commitar.
+> ⚠️ `./data/` contém segredos do cluster (chaves privadas da PKI, kubeconfigs) e, junto com `./data/local-path/`, todos os dados dos volumes. Ambos estão **gitignored** — nunca commitar.
 
 ### Limpar tudo
 
 ```bash
-docker compose down -v   # remove container + volumes nomeados (bind mounts em ./data/ e ./data/rook/ são mantidos)
-# Para apagar totalmente os dados do cluster: rm -rf data/* data/rook/*   (irreversível!)
+docker compose down -v   # remove container + volumes nomeados (bind mounts em ./data/ e ./data/local-path/ são mantidos)
+# Para apagar totalmente os dados do cluster: rm -rf data/* data/local-path/*   (irreversível!)
 ```
 
 ---
@@ -251,17 +240,13 @@ docker compose build --build-arg TARGETARCH=arm64
 | `CNI_VERSION` | `v1.6.2` | Versão dos CNI plugins |
 | `CILIUM_VERSION` | `v1.19.5` | Versão do Cilium |
 | `CILIUM_CLI_VERSION` | `v0.19.4` | Versão do Cilium CLI |
-| `ROOK_VERSION` | `v1.20.3` | Versão do operador Rook (manifests baixados dessa tag) |
 | `TARGETARCH` | `amd64` | Arquitetura alvo |
-
-> A **versão da imagem do Ceph** é definida em `manifests/built-in/ceph/01-ceph-cluster.yaml` (`quay.io/ceph/ceph:v20.2.2` — pinada na versão oficialmente testada com o Rook 1.20.3; **não** usar a tag flutuante `:v20`).
 
 ### Variáveis de Ambiente (runtime)
 
 | Variável | Default | Descrição |
 |---|---|---|
 | `NODE_NAME` | `k8s-one` | Nome do nó no cluster |
-| `ROOK_OSD_SIZE` | `30G` | Tamanho da imagem sparse do OSD (`/var/lib/rook/osd.img`) |
 | `ARGOCD_VERSION` | `v3.5.1` | Versão do Argo CD instalada no boot (formato: `vX.Y.Z`) |
 
 Defina `ARGOCD_VERSION` no arquivo `.env` da raiz. Depois de alterar a versão,
@@ -448,7 +433,7 @@ kubectl run nginx --image=nginx:alpine --port=80
 kubectl get pods -w
 ```
 
-### PVC com Ceph RBD (block, ReadWriteOnce)
+### PVC com local-path (ReadWriteOnce)
 
 ```yaml
 apiVersion: v1
@@ -457,7 +442,7 @@ metadata:
   name: my-data
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: ceph-block
+  storageClassName: local-path
   resources:
     requests:
       storage: 1Gi
@@ -486,22 +471,12 @@ kubectl logs app
 # Hello from K8s-One!
 ```
 
-### PVC com CephFS (ReadWriteMany)
+### Volumes compartilhados (ReadWriteMany)
 
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: shared-data
-spec:
-  accessModes: [ReadWriteMany]
-  storageClassName: cephfs
-  resources:
-    requests:
-      storage: 100Mi
-```
-
-Qualquer número de pods no nó pode montar `shared-data` simultaneamente (validado: 2 réplicas lendo/escrevendo o mesmo volume).
+O `local-path` provisiona diretórios hostPath locais do nó, então um PVC é
+**ReadWriteOnce** apenas. Não há filesystem de cluster para `ReadWriteMany` — use
+um mecanismo em nível de aplicação (object storage, NFS ou um banco) para dados
+compartilhados.
 
 ### Network Policy com Cilium
 
@@ -593,10 +568,7 @@ k8s-one/
 ├── scripts/
 │   ├── entrypoint.sh                   # Orquestração: PKI, configs, processos, manifests
 │   ├── deploy-apps.sh                  # Aplica manifests/apps via kustomize (sem docker cp)
-│   ├── create-secrets.sh               # Cria/atualiza Secrets a partir de manifests/**/secrets/
-│   ├── rbd-nbd-reaper.sh               # Desmapeia rbd-nbd órfãos (boot; dry-run por padrão)
-│   ├── fix-rbd-stale.sh                # Recuperação manual de mapeamentos rbd-nbd órfãos
-│   └── fix-nbd-stuck.sh                # Desconecta nbd mortos (container/Docker travado)
+│   └── create-secrets.sh               # Cria/atualiza Secrets a partir de manifests/**/secrets/
 │
 ├── configs/
 │   └── containerd-config.toml          # containerd: runc + cgroupfs + overlayfs
@@ -628,16 +600,8 @@ k8s-one/
     │   │   ├── 07-service.yaml
     │   │   ├── 08-deployment.yaml
     │   │   └── 09-api-service.yaml
-    │   └── ceph/                       # Cluster Ceph, storage e dashboard
-    │       ├── 01-ceph-cluster.yaml
-    │       ├── 02-ceph-block-pool.yaml
-    │       ├── 03-block-storage-class.yaml
-    │       ├── 04-ceph-filesystem.yaml
-    │       ├── 05-filesystem-storage-class.yaml
-    │       ├── 06-dashboard-namespace.yaml
-    │       ├── 07-dashboard-service.yaml
-    │       ├── 08-dashboard-ingress.yaml
-    │       └── 09-dashboard-certificate.yaml
+    │   └── local-path/                  # local-path-provisioner + StorageClass default
+    │       ├── local-path-storage.yaml  # Namespace, RBAC, Deployment, StorageClass, ConfigMap
     │       └── kustomization.yaml
     │   ├── metallb/                     # MetalLB L2 (LB p/ serviços; ver "DNS Local" — não é o caminho externo)
     │   │   ├── 00-crds.yaml … 07-webhook.yaml
@@ -676,7 +640,7 @@ k8s-one/
     │   │       ├── grafana-admin.yaml   # admin do Grafana (admin-user/admin-password)
     │   │       └── grafana-oidc.env     # client OIDC do SSO (GF_AUTH_GENERIC_OAUTH_*)
     ├── postgres/                       # PostgreSQL 18 — instância compartilhada (manifestos próprios, deste repo)
-    │   ├── 01-pvc.yaml                 # PVC postgres-data (5Gi, ceph-block)
+    │   ├── 01-pvc.yaml                 # PVC postgres-data (5Gi, local-path)
     │   ├── 02-deployment.yaml          # postgres:18.6 (ns data)
     │   ├── 03-configmap-initdb.yaml    # init: cria as roles/bancos dos apps
     │   ├── 04-service.yaml             # Service postgres + NodePort 30432
@@ -684,7 +648,6 @@ k8s-one/
     ├── apps/                           # Sob demanda; um recurso Kubernetes por arquivo YAML
     │   ├── kustomization.yaml          # Compõe as pastas dos apps
     │   └── tileserver/                 # TileServer GL
-    # rook-crds/common/csi-operator/operator.yaml  (baixados no build do Rook v1.20.3)
 ```
 
 ---
@@ -701,14 +664,12 @@ Timeline típica da primeira execução (cold start, sem cache de imagens):
  2s   ▶ etcd start → health check OK
  5s   ▶ kube-apiserver start → /healthz OK
  7s   ▶ kube-controller-manager / scheduler / kubelet / kube-proxy
- 8s   ▶ Attach do loop device do OSD (/dev/loop0 ← osd.img) + udevd
 10s   ▶ cilium install (reinstalação limpa a cada boot)
 35s   ▶ Node Ready ✓
-40s   ▶ CoreDNS, operador Rook, cluster Ceph, HAProxy aplicados
-~2-3m ▶ Rook-Ceph saudável (mon, mgr, osd) — Ceph cluster Ready
+40s   ▶ CoreDNS, local-path-provisioner, HAProxy aplicados
 ```
 
-> Em restarts subsequentes (imagens já em cache), o boot cai para ~1-2 min. Os dados do OSD do Ceph sobrevivem via `data/rook/`.
+> Em restarts subsequentes (imagens já em cache), o boot cai para ~1-2 min. Os dados dos volumes sobrevivem via `data/local-path/`.
 
 ---
 
@@ -833,19 +794,6 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 Manifestos do ingress/certificado: `manifests/apps/argocd/` (gitignored).
 
-### Ceph Dashboard (`ceph.lan`)
-
-Dashboard web do Ceph em `https://ceph.lan` (Ingress ns `ceph-dashboard` → `ceph-dashboard-svc` → `rook-ceph-mgr-dashboard:7000`). TLS usa cert mkcert **dedicado** `ceph-dashboard-tls` (emitido pelo `local-ca` para `ceph.lan`). O wildcard `*.lan` (`dns-lan-tls`) **não** é usado: os validadores rejeitam wildcard de label único como `*.lan` (`.lan` tratado como domínio apex), então cada app `.lan` tem seu próprio Certificate (mesmo padrão headlamp/argocd). O basic-auth do HAProxy foi removido; a autenticação é o **próprio login do dashboard do Ceph**.
-
-Login: usuário `admin`, senha:
-```bash
-docker exec k8s-one kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get secret rook-ceph-dashboard-password -o jsonpath='{.data.password}' | base64 -d
-```
-
-> **Nota:** a aba **Orchestrator** mostra "Orchestrator is not available: Module not found" — esperado. O módulo mgr `rook` está desabilitado (workaround de crash, ver Problemas Conhecidos).
-
-Manifestos: `manifests/built-in/ceph/` (`06-dashboard-namespace.yaml`, `07-dashboard-service.yaml`, `08-dashboard-ingress.yaml`, `09-dashboard-certificate.yaml`), aplicados no boot pelo `entrypoint.sh`.
-
 ### Authentik (`authentik.lan`)
 
 Provedor de identidade em `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, cert mkcert `authentik-tls`). O banco é o **PostgreSQL 18 compartilhado do namespace `data`** (ver [PostgreSQL (data)](#postgresql-data) abaixo) — banco `authentik`, dono a role `authentik` — por isso o `postgresql:` embutido do chart está `enabled: false` e a conexão vem inteira do Secret `authentik-config` (`AUTHENTIK_POSTGRESQL__*`, entregue ao server e ao worker por `envFrom`). Está aqui para ser o **login único** dos apps do cluster; ligados nele até agora: LiteLLM, Headlamp e Grafana.
@@ -913,7 +861,7 @@ Manifestos: `manifests/argocd/litellm/`. Secrets: ver a tabela acima.
 
 ### Grafana (`grafana.lan`)
 
-Métricas e dashboards do cluster: `kube-prometheus-stack` (chart 90.0.0, ns `monitoring`), com o Grafana `13.2.1-distroless`, PVC `ceph-block` de 10Gi e os sidecars de datasources/dashboards lendo ConfigMaps. Acessível em `https://grafana.lan` — Ingress `grafana` + Certificate `grafana-tls` (`manifests/argocd/prometheus-stack/03-certificate.yaml` e `04-ingress.yaml`, aplicados com `kubectl apply -f`, porque a Application aponta para o chart de terceiros e não para este repo).
+Métricas e dashboards do cluster: `kube-prometheus-stack` (chart 90.0.0, ns `monitoring`), com o Grafana `13.2.1-distroless`, PVC `local-path` de 10Gi e os sidecars de datasources/dashboards lendo ConfigMaps. Acessível em `https://grafana.lan` — Ingress `grafana` + Certificate `grafana-tls` (`manifests/argocd/prometheus-stack/03-certificate.yaml` e `04-ingress.yaml`, aplicados com `kubectl apply -f`, porque a Application aponta para o chart de terceiros e não para este repo).
 
 **SSO pelo Authentik** (provider `Grafana`, blueprint `grafana-oidc.yaml`). O Grafana fala OIDC **nativamente** — não tem proxy na frente como o Headlamp; o Authentik só entrega os claims:
 
@@ -947,38 +895,45 @@ A autenticação é `scram-sha-256` para toda conexão remota: o entrypoint da i
 
 ## Storage
 
-### Rook-Ceph
+### local-path-provisioner
 
-O Ceph é implantado pelo Rook como cluster de nó único com **um OSD em loop device** (imagem sparse de 30G, `osd.img`) — nenhum disco do host é tocado.
+O storage é fornecido pelo **local-path-provisioner** (Rancher v0.0.30) no
+namespace `local-path-storage`. Ele provisiona volumes dinamicamente como
+diretórios hostPath em `/opt/local-path-provisioner`, persistidos no host pelo
+bind mount `./data/local-path`.
 
-- **Operador**: Rook v1.20.3 · **Ceph**: v20.2.2 (pinada — ver Problemas Conhecidos)
-- **OSD**: 1 OSD bluestore em `/dev/loop0` ← `/var/lib/rook/osd.img` (persistido em `./data/rook/`)
-- **Data path**: `/var/lib/rook` (bind mount)
+- **Provisioner**: `rancher.io/local-path`
+- **Data path**: `/opt/local-path-provisioner` (bind mount de `./data/local-path`)
 
-| StorageClass | Provisioner | Access | Pool | Uso |
-|---|---|---|---|---|
-| `ceph-block` (**default**) | `rook-ceph.rbd.csi.ceph.com` | RWO | `replicapool` | Volumes block (RBD) |
-| `cephfs` | `rook-ceph.cephfs.csi.ceph.com` | **RWX** | `cephfs-data0` | Volumes de filesystem compartilhado |
+| StorageClass | Provisioner | Access | Binding | Reclaim | Expansão |
+|---|---|---|---|---|---|
+| `local-path` (**default**) | `rancher.io/local-path` | RWO | `WaitForFirstConsumer` | `Delete` | não suportada |
 
 ```bash
 kubectl get sc
-# NAME                 PROVISIONER                        RECLAIMPOLICY  VOLUMEBINDINGMODE
-# ceph-block (default) rook-ceph.rbd.csi.ceph.com         Delete         Immediate
-# cephfs               rook-ceph.cephfs.csi.ceph.com      Delete         Immediate
+# NAME                   PROVISIONER             RECLAIMPOLICY  VOLUMEBINDINGMODE
+# local-path (default)   rancher.io/local-path   Delete         WaitForFirstConsumer
 ```
 
-Replicação `size: 1` (nó único) — os dados **não são redundantes**; o OSD vive num loop file no disco do host. Faça backup de `data/rook/` se os dados importarem.
+Os volumes **não são redundantes**: são diretórios comuns no disco do host, sob
+`data/local-path/`. Faça backup desse diretório se os dados importarem. Como o
+`local-path` não tem expansão online, os tamanhos dos PVCs são fixos
+(`allowVolumeExpansion` não é definido).
+
+> **Histórico.** Até 26/09/2026 o storage era Rook-Ceph (RBD + CephFS). Foi
+> substituído pelo local-path-provisioner: o Ceph de nó único consumia ~2 GiB de
+> requests e ~700m de CPU e era propenso a deadlocks de nbd/OSD.
 
 ---
 
 ## Problemas Conhecidos
 
-### Módulo mgr "rook" desabilitado (workaround)
+### local-path não tem expansão online
 
-- **Sintoma:** crash-loop do `ceph mgr` a cada ~15s: `NotImplementedError` em `node_proxy_fullreport` (crash dumps enchendo o data dir).
-- **Causa:** Ceph v20.2.3 + Rook 1.20.3 — o módulo `prometheus` do mgr do Ceph chama `node_proxy_fullreport()`, que o módulo rook não implementa. Upstream: [rook/rook#18124](https://github.com/rook/rook/issues/18124) / [tracker 79106](https://tracker.ceph.com/issues/79106).
-- **Estado atual:** o módulo mgr `rook` está **desabilitado** (`spec.mgr.modules[0].enabled: false` em `ceph/01-ceph-cluster.yaml`) — workaround recomendado pelos mantenedores. O operador Rook **não** depende do módulo; só a CLI `ceph orch`/integração com dashboard é perdida.
-- **Reabilitar** quando o fix upstream ([ceph/ceph#70967](https://github.com/ceph/ceph/pull/70967)) for lançado.
+- **Sintoma:** editar `resources.requests.storage` de um PVC é rejeitado.
+- **Causa:** a StorageClass `local-path` não define `allowVolumeExpansion`.
+- **Contorno:** recriar o PVC e restaurar os dados (ou migrar para um PVC maior).
+  Os tamanhos são fixos na criação.
 
 ---
 
@@ -999,12 +954,6 @@ Edite `configs/containerd-config.toml`:
 ```toml
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
   SystemdCgroup = false   # true se o host usa systemd cgroups
-```
-
-### Trocar o tamanho do OSD
-
-```bash
-docker compose build --build-arg ROOK_OSD_SIZE=50G   # env var em runtime; afeta osd.img no primeiro boot
 ```
 
 ### Trocar o Pod CIDR
@@ -1038,83 +987,20 @@ Causas comuns:
 - Cilium ainda não instalou o CNI → aguardar cilium-agent ficar Running
 - Erro de mount propagation → verificar se `/sys` está montado rw
 
-### PVC preso em ContainerCreating (`rbd image ... is still being used`)
+### PVC preso em Pending
 
-Sintoma nos eventos do pod: `rbd image ... is still being used` ou `rbd-nbd: cookie mismatch`.
-
-Causa: o StorageClass `ceph-block` usa `mounter: rbd-nbd`; mapeamentos `rbd-nbd` podem
-sobreviver à recriação de pods/plugin e o healer do cephcsi não consegue reaproveitá-los.
-
-**As ferramentas do repositório não cobrem esse caso de forma confiável.** Tanto o
-`fix-rbd-stale.sh` quanto o `rbd-nbd-reaper.sh` decidem que um mapeamento é órfão
-procurando um `volumeHandle` sem `VolumeAttachment` em `Attached=true`. Mas o
-`VolumeAttachment` tem escopo de nó: ele sobrevive à substituição do pod que usava o
-volume, permanecendo `Attached=true` por um volume que nenhum pod vivo está usando.
-Reproduzir essa heurística contra o estado ao vivo durante um rollout afetado reporta
-**zero órfãos**, com os mapeamentos obsoletos ali na frente. Não use `--all` como
-contorno — ele desmapeia todos os dispositivos, inclusive os que servem pods rodando
-(Prometheus, Grafana, postgres).
-
-O teste definitivo é se o dispositivo está **de fato montado**:
+O `local-path` usa `volumeBindingMode: WaitForFirstConsumer`, então um PVC fica
+`Pending` até que um pod que o consome seja agendado. Isso é esperado, não é falha.
 
 ```bash
-# dispositivo -> volumeHandle, e quantas vezes está montado (0 = órfão)
-for d in /sys/block/nbd[0-9]*; do
-  b=$(cat "$d/backend" 2>/dev/null); [ -z "$b" ] && continue
-  n=$(basename "$d")
-  echo "$n ${b##*-} mounts=$(docker exec k8s-one grep -c "/dev/$n " /proc/mounts)"
-done
-
-# a qual PV cada volumeHandle pertence
-kubectl get pv -o go-template='{{range .items}}{{if .spec.csi}}{{.spec.csi.volumeHandle}} {{.metadata.name}}{{"\n"}}{{end}}{{end}}'
+kubectl describe pvc <nome-do-pvc> -n <namespace>
+kubectl -n local-path-storage logs deploy/local-path-provisioner
 ```
 
-A numeração dos `nbd` não é cronológica e não significa nada — nunca deduza staleness
-pelo número do dispositivo. Desmapeie apenas os que mostrarem `mounts=0`:
-
-```bash
-PLUGIN=rook-ceph.rbd.csi.ceph.com-nodeplugin-<hash>
-kubectl -n rook-ceph exec $PLUGIN -c csi-rbdplugin -- rbd-nbd unmap /dev/nbdN
-```
-
-Isso apenas desanexa o block device — a imagem RBD e seu conteúdo não são tocados, e o
-pod que aguardava assume o volume em segundos.
-
-> O `rbd-nbd-reaper.sh` roda no boot e está **habilitado** nesta instalação
-> (`RBD_REAPER_DRY_RUN=0` no `.env`). Ele compartilha a heurística de
-> `VolumeAttachment` descrita acima, então trate-o como rede de segurança para sobras,
-> não como cobertura para este modo de falha. O `fix-rbd-stale.sh` continua útil para o
-> caso que a heurística dele de fato atende.
-
-### Container/Docker travado no rebuild (`did not receive an exit event`)
-
-Sintomas: `docker compose up -d` falha com `cannot stop container ... tried to kill
-container, but did not receive an exit event`, e/ou o `dockerd` fica preso em
-"Loading containers". Causa: o `rbd-nbd` do Ceph CSI usa `--io-timeout=0` (sem
-timeout); se o container for terminado com I/O pendente, o `systemd-udevd` fica em
-D-state num nbd morto e o container não finaliza.
-
-Recuperação (no host, com `sudo`):
-
-```bash
-# 1. Parar o Docker (se travar: sudo systemctl kill -s SIGKILL docker)
-sudo systemctl stop docker.socket docker
-
-# 2. Remover a task presa no containerd
-sudo ctr -n moby tasks list          # anote o ID (STATUS RUNNING/STOPPED)
-sudo ctr -n moby tasks rm <ID>
-sudo ctr -n moby containers rm <ID>
-
-# 3. Desconectar os nbd mortos
-sudo scripts/fix-nbd-stuck.sh --apply --yes
-
-# 4. Subir o Docker e recriar o cluster
-sudo systemctl start docker
-docker compose up -d
-```
-
-O `rbd-nbd-reaper.sh` previne a maioria dos casos; o procedimento acima é o
-último recurso quando o container não morre.
+Causas comuns:
+- Nenhum pod consumindo o PVC ainda → é o `WaitForFirstConsumer` funcionando
+- Provisioner não está Running → ver os logs acima
+- Dados do volume sumiram após recriar o container → confirmar que o bind mount `./data/local-path` existe
 
 ### CoreDNS CrashLoopBackOff
 
@@ -1125,17 +1011,6 @@ kubectl logs -n kube-system -l k8s-app=kube-dns
 Causas comuns:
 - Loop detection → já resolvido com forward para 8.8.8.8
 - Corefile syntax error → verificar `manifests/built-in/coredns/04-configmap.yaml`
-
-### OSD não criado após reboot (0 OSDs)
-
-```bash
-docker exec k8s-one losetup -a          # deve mostrar /dev/loop0 ← /var/lib/rook/osd.img
-docker exec k8s-one kubectl --kubeconfig=/etc/kubernetes/admin.conf -n rook-ceph get pod -l app=rook-ceph-osd
-```
-
-Causas comuns:
-- Loop device não attachado → `losetup /dev/loop0 /var/lib/rook/osd.img` e depois deletar o job `rook-ceph-osd-prepare` + reiniciar o operator
-- `ROOK_CEPH_ALLOW_LOOP_DEVICES` diferente de `true` → verificar configmap `rook-ceph-operator-config`
 
 ### Node NotReady
 
@@ -1162,9 +1037,9 @@ docker compose logs -f | grep etcd
 ### Reset completo
 
 ```bash
-docker compose down -v   # remove container + volumes nomeados (bind mounts ./data/ e ./data/rook/ são mantidos)
+docker compose down -v   # remove container + volumes nomeados (bind mounts ./data/ e ./data/local-path/ são mantidos)
 docker compose up -d     # fresh start
-# Para apagar também os dados do cluster: rm -rf data/* data/rook/*  (irreversível!)
+# Para apagar também os dados dos volumes: rm -rf data/* data/local-path/*  (irreversível!)
 ```
 
 ---
@@ -1179,7 +1054,7 @@ docker compose up -d     # fresh start
 | **Docker Compose** | v2.20+ | v2.30+ |
 | **RAM** | 16 GB | 24 GB |
 | **CPU** | 2 cores | 4 cores |
-| **Disco** | 10 GB (imagem + OSD sparse 30G) | 20 GB+ |
+| **Disco** | 10 GB (imagem + dados dos volumes) | 20 GB+ |
 | **OS** | Linux (kernel 5.10+) | Linux (kernel 6.x) |
 | **Arch** | amd64 | amd64 |
 
@@ -1204,8 +1079,8 @@ docker compose up -d     # fresh start
 
 - **Não é HA**: nó único, sem redundância. etcd, apiserver, etc. são single-instance.
 - **Não para produção**: destinado a desenvolvimento, testes, CI/CD, laboratório.
-- **Storage sem redundância**: replicação Ceph `size: 1`, OSD único em loop file.
-- **Privileged mode**: o container roda com `--privileged` (necessário para kubelet/containerd + loop devices).
+- **Storage sem redundância**: volumes `local-path` são diretórios hostPath comuns no disco do host.
+- **Privileged mode**: o container roda com `--privileged` (necessário para kubelet/containerd).
 - **Apenas amd64**: arm64 pode funcionar com `--build-arg TARGETARCH=arm64` mas não foi testado.
 - **Sem systemd**: usa `cgroupfs` como cgroup driver (sem systemd dentro do container).
 - **Cert rotation**: desabilitada. Certificados duram 10 anos. Para clusters de longa duração, considere implementar rotação.

@@ -545,6 +545,13 @@ start_kube_proxy() {
 #      layer that catches a dead BPF datapath after a container restart,
 #      where old pods may still report Running but no new pod can get a
 #      network sandbox.
+#
+# NOTE: `cilium status --brief` is not a flag in this CLI build, so layer 2
+# always fails and this function returns non-zero — which forces a Cilium
+# reinstall on every boot. That reinstall is load-bearing: after the k8s-one
+# container is recreated, the pod->ClusterIP datapath is stale and only a
+# reinstall restores it. Do NOT "fix" this into a healthy result without
+# first making the datapath recovery explicit elsewhere.
 cilium_healthy() {
   local kc="kubectl"
 
