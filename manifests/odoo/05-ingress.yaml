@@ -1,0 +1,37 @@
+# Ingress do Odoo em https://odoo.lan
+#
+# O cluster não tem IngressClass: roteia pela annotation
+# haproxy.org/ingress.class, igual ao resto do repositório.
+#
+# ⚠️ Pendência de DNS: o AdGuard (ns networking) responde os hosts `.lan` por
+# rewrite POR HOST, não por wildcard — é preciso criar o rewrite
+# `odoo.lan -> 192.168.1.20` no AdGuard, senão o nome não resolve (o Ingress
+# sozinho não basta).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: odoo
+  namespace: odoo
+  annotations:
+    haproxy.org/ingress.class: haproxy
+    haproxy.org/ssl-cert-namespace: odoo
+    haproxy.org/ssl-cert: odoo-tls
+    # Odoo faz downloads/uploads longos (relatórios, anexos): folga no timeout.
+    haproxy.org/timeout-server: "300s"
+    haproxy.org/timeout-client: "300s"
+spec:
+  tls:
+    - hosts:
+        - odoo.lan
+      secretName: odoo-tls
+  rules:
+    - host: odoo.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: odoo
+                port:
+                  name: http

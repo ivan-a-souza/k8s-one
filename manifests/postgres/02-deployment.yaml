@@ -1,7 +1,8 @@
 # PostgreSQL 18.6 (imagem OFICIAL) — a instância compartilhada do ns data,
-# que serve as duas aplicações em bancos separados:
+# que serve as aplicações em bancos separados:
 #   litellm   -> role litellm   (schema litellm, do Prisma)
 #   authentik -> role authentik (Django)
+#   odoo      -> role odoo      (Odoo 19; ver manifests/odoo)
 # Substitui o YugabyteDB (que só servia o LiteLLM) e o PostgreSQL que o chart
 # do Authentik subia por conta própria.
 #
@@ -122,6 +123,9 @@ spec:
             - name: authentik-db
               mountPath: /run/secrets/authentik-db
               readOnly: true
+            - name: odoo-db
+              mountPath: /run/secrets/odoo-db
+              readOnly: true
             # readOnlyRootFilesystem exige estes dois: o socket da imagem
             # Debian fica em /var/run/postgresql (não em /tmp) e o diretório da
             # imagem é read-only. Mesmo arranjo do PG do authentik, que já roda
@@ -186,6 +190,10 @@ spec:
         - name: authentik-db
           secret:
             secretName: authentik-postgresql-auth
+            defaultMode: 0440
+        - name: odoo-db
+          secret:
+            secretName: odoo-db
             defaultMode: 0440
         - name: run
           emptyDir: {}

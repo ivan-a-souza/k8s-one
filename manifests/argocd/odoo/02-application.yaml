@@ -1,0 +1,35 @@
+# Argo CD Application do Odoo — o ERP de estudo no ns `odoo`.
+#
+# Fonte: o PRÓPRIO repo GitOps (k8s-one), caminho manifests/odoo (com
+# kustomization.yaml; o Argo detecta kustomize sozinho). Mesmo padrão do
+# vaultwarden e do postgres.
+#
+# O banco é o PostgreSQL 18 já existente no ns `data`: aqui NÃO há StatefulSet
+# de banco. A role/banco `odoo` são criados pelo init do postgres.
+#
+# Segredo `odoo-db` NÃO está no repo (gitignored) — criar antes com:
+#   scripts/create-secrets.sh
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: odoo
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ivan-a-souza/k8s-one.git
+    targetRevision: main
+    path: manifests/odoo
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: odoo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # O ns `odoo` nasce aqui e fica fora do tracking (mesmo motivo do app
+      # postgres): protege o PVC do filestore do finalizer.
+      - CreateNamespace=true

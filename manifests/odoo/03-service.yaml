@@ -1,0 +1,17 @@
+# ClusterIP: o único consumidor é o Ingress do HAProxy (e, se quiser,
+# `kubectl port-forward` para manutenção). Não expor NodePort: o acesso de fora
+# do cluster já acontece pelo Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: odoo
+  namespace: odoo
+  labels:
+    app: odoo
+spec:
+  selector:
+    app: odoo
+  ports:
+    - name: http
+      port: 8069
+      targetPort: http

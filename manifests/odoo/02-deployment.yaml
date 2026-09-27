@@ -1,0 +1,135 @@
+# Odoo 19 (imagem OFICIAL) — o servidor.
+#
+# Banco: a instância PostgreSQL 18 que já vive no ns `data` (Service
+# `postgres`), em banco PRÓPRIO (`odoo`), separado de litellm e authentik. A
+# role e o banco são criados pelo script de init do próprio postgres
+# (manifests/postgres/03-configmap-initdb.yaml) — a MESMA senha, vinda do mesmo
+# Secret `odoo-db` (scripts/create-secrets.sh), para não existir duas verdades.
+#
+# ⚠️ A imagem oficial é `odoo:19.0` — o código que está em ~/Projects/odoo no
+# host NÃO é usado em runtime. O clone serve para ESTUDO. Se um dia houver
+# módulo próprio, aí sim passa a fazer sentido buildar imagem derivada
+# (`FROM odoo:19.0` + COPY addons) e publicá-la num registry.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: odoo
+  namespace: odoo
+  labels:
+    app: odoo
+spec:
+  replicas: 1
+  # Recreate: o filestore é ReadWriteOnce e o nó é único. Com RollingUpdate o
+  # maxSurge tentaria subir um segundo pod disputando o mesmo PVC (mesmo
+  # raciocínio do postgres e do vaultwarden).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: odoo
+  template:
+    metadata:
+      labels:
+        app: odoo
+    spec:
+      # uid/gid da imagem: o usuário `odoo` é 100:101 (conferido com
+      # `docker run --rm --entrypoint id odoo:19.0`). NÃO é 101:101.
+      # fsGroup é OBRIGATÓRIO no PVC (local-path entrega o diretório raiz como
+      # root:root e o kubelet só concede o grupo ao aplicar o fsGroup); o uid
+      # 100 precisa do grupo 101 para escrever em /var/lib/odoo.
+      securityContext:
+        runAsUser: 100
+        runAsGroup: 101
+        runAsNonRoot: true
+        fsGroup: 101
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: odoo
+          image: odoo:19.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          # O entrypoint da imagem injeta `--db_host/--db_port/--db_user/
+          # --db_password` a partir das envs HOST/PORT/USER/PASSWORD (ver
+          # /entrypoint.sh), então o banco NÃO vai na linha de comando.
+          #
+          # --init=base só é efetivo no primeiro boot (com o banco já populado
+          # o Odoo pulou a instalação; é idempotente). --db-filter impede que
+          # outros bancos da instância (litellm, authentik) apareçam no
+          # seletor do Odoo. --proxy-mode deixa o Odoo entender que quem fala
+          # com ele é o HAProxy (X-Forwarded-*), e não o cliente direto.
+          args:
+            - "--database=odoo"
+            - "--init=base"
+            - "--without-demo=all"
+            - "--db-filter=^odoo$"
+            - "--proxy-mode"
+          env:
+            - name: HOST
+              value: postgres.data.svc.cluster.local
+            - name: PORT
+              value: "5432"
+            - name: USER
+              valueFrom:
+                secretKeyRef:
+                  name: odoo-db
+                  key: username
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: odoo-db
+                  key: password
+          ports:
+            - name: http
+              containerPort: 8069
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/odoo
+            # readOnlyRootFilesystem ficou DESLIGADO de propósito: o Odoo
+            # escreve em caminhos variados da imagem (sessões do Werkzeug,
+            # cache de assets). Ligar isso sem mapear cada diretório só
+            # criaria falha silenciosa; o endurecimento fica para depois.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            # Modesto de propósito: o cluster está apertado de RAM (nó só com
+            # ~8 GiB alocáveis, swap do host cheia). 1 worker implícito.
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # /web/login é barato (não toca o banco a fundo). startupProbe
+          # generoso: o primeiro boot roda init de módulos e tabelas a frio.
+          startupProbe:
+            httpGet:
+              path: /web/login
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60      # ate 10 min no primeiro boot
+          readinessProbe:
+            httpGet:
+              path: /web/login
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /web/login
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: odoo-data
+        - name: tmp
+          emptyDir: {}

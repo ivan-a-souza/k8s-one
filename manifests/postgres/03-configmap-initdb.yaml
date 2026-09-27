@@ -1,6 +1,10 @@
-# Init do PostgreSQL 18: cria as roles e os bancos que as duas aplicações
-# esperam. Roda UMA vez, quando o PGDATA está vazio, como superusuário PELO
-# SOCKET LOCAL (é o default `trust` do initdb para `local`).
+# Init do PostgreSQL 18: cria as roles e os bancos que as aplicações esperam
+# (litellm, authentik, odoo). Roda UMA vez, quando o PGDATA está vazio, como
+# superusuário PELO SOCKET LOCAL (é o default `trust` do initdb para `local`).
+#
+# ⚠️ Em volume JÁ inicializado este script NÃO roda de novo: para uma role
+# nova num cluster em produção, criar à mão (foi o caso do odoo em 27/09/2026)
+# e manter aqui só a verdade para um data-dir recriado do zero.
 #
 # É o papel que o hook PreSync `litellm-db-bootstrap` fazia no YugabyteDB — só
 # que lá ele conectava de fora como superusuário SEM SENHA, porque o
@@ -64,9 +68,11 @@ data:
     # (scripts/create-secrets.sh), para não existir uma segunda verdade.
     create_role litellm   "$(cat /run/secrets/litellm-db/password)"
     create_role authentik "$(cat /run/secrets/authentik-db/password)"
+    create_role odoo      "$(cat /run/secrets/odoo-db/password)"
 
     create_db litellm   litellm
     create_db authentik authentik
+    create_db odoo      odoo
 
     # O schema dedicado do Prisma: o DATABASE_URL do LiteLLM traz
     # `?schema=litellm`. No PostgreSQL (15+) isso nem seria necessário — o

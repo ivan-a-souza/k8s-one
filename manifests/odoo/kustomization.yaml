@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# SEM 00-namespace.yaml, de propósito: com `CreateNamespace=true` na
+# Application, o ns `odoo` fica FORA do tracking do Argo — é o que impede o
+# finalizer de apagar o namespace (e, em cascata, o PVC do filestore) ao
+# excluir a Application. Mesmo arranjo do app `postgres` no ns `data`.
+resources:
+  - 01-pvc.yaml
+  - 02-deployment.yaml
+  - 03-service.yaml
+  - 04-certificate.yaml
+  - 05-ingress.yaml

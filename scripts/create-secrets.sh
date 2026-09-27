@@ -84,5 +84,14 @@ apply_env_secret ops headlamp-oidc manifests/ops/headlamp/secrets/headlamp-oidc.
 # oauth2-proxy — auth proxy na frente do Headlamp (client + cookie secret)
 apply_env_secret ops oauth2-proxy manifests/ops/headlamp/secrets/oauth2-proxy.env
 
+# odoo — credenciais do banco (chaves username / password). O ns `odoo` é
+# criado pelo Argo (CreateNamespace) no sync; como o Secret nasce ANTES dele,
+# garante-se o ns aqui (idempotente).
+"${KC[@]}" create namespace odoo --dry-run=client -o yaml | "${KC[@]}" apply -f -
+apply_yaml_secret manifests/argocd/odoo/secrets/odoo-db.yaml
+# odoo/mesma credencial no ns data: é o script de init do PostgreSQL que cria
+# a role com essa senha (o banco vive em `data`, o app em `odoo`).
+apply_yaml_secret_in_ns data manifests/argocd/odoo/secrets/odoo-db.yaml
+
 echo "OK: secrets aplicados."
 apply_env_secret vaultwarden vaultwarden-env manifests/argocd/vaultwarden/secrets/vaultwarden.env

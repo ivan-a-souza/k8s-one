@@ -1,0 +1,22 @@
+# Odoo — filestore (/var/lib/odoo): anexos, ícones e cache de assets.
+#
+# Prune=false,Delete=false pelo mesmo motivo do PVC do postgres e do
+# vaultwarden: sem isto, o prune do Argo CD ou a exclusão da Application
+# apagariam o volume. Com as anotações, o volume só sai por ação humana.
+#
+# 5Gi: a base em si mora no PostgreSQL (ns data); aqui fica só o filestore,
+# que numa instalação sem uso real ocupa poucos MB.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: odoo-data
+  namespace: odoo
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi

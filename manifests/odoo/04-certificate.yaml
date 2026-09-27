@@ -1,0 +1,16 @@
+# Certificado do odoo.lan, emitido pelo ClusterIssuer `local-ca` (a CA do
+# mkcert) — mesmo padrão de vault/argocd/headlamp/ceph/authentik/litellm.
+# Certificado por host: o wildcard *.lan é rejeitado por validadores.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: odoo-tls
+  namespace: odoo
+spec:
+  secretName: odoo-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: odoo.lan
+  dnsNames:
+    - odoo.lan
