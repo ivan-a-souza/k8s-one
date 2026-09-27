@@ -59,14 +59,16 @@ spec:
           #
           # --init=base só é efetivo no primeiro boot (com o banco já populado
           # o Odoo pulou a instalação; é idempotente). --db-filter impede que
-          # outros bancos da instância (litellm, authentik) apareçam no
-          # seletor do Odoo. --proxy-mode deixa o Odoo entender que quem fala
-          # com ele é o HAProxy (X-Forwarded-*), e não o cliente direto.
+          # outros bancos da instância (litellm, authentik, naesquina) apareçam
+          # no seletor do Odoo. É `^odoo` (prefixo), e NÃO `^odoo$`: o Ivan
+          # cria bancos de teste do tipo odoo_* pela interface, e com o filtro
+          # exato eles nem apareceriam. --proxy-mode deixa o Odoo entender que
+          # quem fala com ele é o HAProxy (X-Forwarded-*), e não o cliente.
           args:
             - "--database=odoo"
             - "--init=base"
             - "--without-demo=all"
-            - "--db-filter=^odoo$"
+            - "--db-filter=^odoo"
             - "--proxy-mode"
           env:
             - name: HOST

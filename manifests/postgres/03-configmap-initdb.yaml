@@ -69,6 +69,10 @@ data:
     create_role litellm   "$(cat /run/secrets/litellm-db/password)"
     create_role authentik "$(cat /run/secrets/authentik-db/password)"
     create_role odoo      "$(cat /run/secrets/odoo-db/password)"
+    # CREATEDB só para o odoo: ele cria bancos pela própria interface
+    # (Database Manager). O create_role acima é least privilege por padrão
+    # (NOSUPERUSER/NOCREATEDB/NOCREATEROLE).
+    psql_super -d postgres -c "ALTER ROLE odoo CREATEDB"
 
     create_db litellm   litellm
     create_db authentik authentik
