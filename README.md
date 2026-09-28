@@ -43,6 +43,7 @@ Packaged in a **minimal Debian-based image** via multi-stage build (no package m
 - [Startup Sequence](#startup-sequence)
 - [PKI & Certificates](#pki--certificates)
 - [Networking](#networking)
+- [Workloads](#workloads)
 - [Storage](#storage)
 - [Known Issues](#known-issues)
 - [Customization](#customization)
@@ -343,6 +344,12 @@ they never contain a password.
 | `litellm-masterkey` | `platform` | `manifests/argocd/litellm/secrets/litellm-masterkey.yaml` | `litellm.masterkeySecretName` |
 | `mkcert-ca` | `cert-manager` | `manifests/built-in/cert-manager/secrets/mkcert-ca.yaml` | root CA for ClusterIssuer `local-ca` |
 | `postgres-superuser` | `data` | `manifests/argocd/postgres/secrets/postgres-superuser.yaml` | PostgreSQL superuser (`POSTGRES_PASSWORD`) |
+| `headlamp-oidc` | `ops` | `manifests/ops/headlamp/secrets/headlamp-oidc.env` | Headlamp OIDC client (`HEADLAMP_CONFIG_OIDC_*`) |
+| `oauth2-proxy` | `ops` | `manifests/ops/headlamp/secrets/oauth2-proxy.env` | oauth2-proxy OIDC client + `cookie_secret` |
+| `odoo-db` | `odoo` + `data` | `manifests/argocd/odoo/secrets/odoo-db.yaml` | Odoo's PostgreSQL role (`odoo`) |
+| `redis-auth` | `data` | `manifests/argocd/redis/secrets/redis-auth.yaml` | Redis `requirepass` |
+| `pgadmin-credentials` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-credentials.yaml` | pgAdmin initial login |
+| `vaultwarden-env` | `vaultwarden` | `manifests/argocd/vaultwarden/secrets/vaultwarden.env` | Vaultwarden env (`ADMIN_TOKEN`, `DOMAIN`, …) |
 
 Formats:
 - `*.env` → created with `kubectl create secret generic --from-env-file` (e.g. `authentik.env`).
@@ -566,87 +573,45 @@ k8s-one/
 │
 ├── scripts/
 │   ├── entrypoint.sh                   # Orchestration: PKI, configs, processes, manifests
-│   ├── deploy-apps.sh                  # Applies manifests/apps via kustomize (no docker cp)
+│   ├── deploy-apps.sh                  # On-demand kustomize apply (manifests/<domain>)
 │   └── create-secrets.sh               # Creates/updates Secrets from manifests/**/secrets/
 │
 ├── configs/
 │   └── containerd-config.toml          # containerd: runc + cgroupfs + overlayfs
 │
-└── manifests/                          # GITIGNORED — mounted ro into the container
+└── manifests/                          # Mounted ro into the container (only manifests/apps/ is gitignored)
     ├── built-in/                       # Core: applied by entrypoint.sh on every boot
-    │   ├── coredns/                    # CoreDNS (one Kubernetes resource per file)
-    │   │   ├── 01-service-account.yaml
-    │   │   ├── 02-cluster-role.yaml
-    │   │   ├── 03-cluster-role-binding.yaml
-    │   │   ├── 04-configmap.yaml
-    │   │   ├── 05-deployment.yaml
-    │   │   └── 06-service.yaml
-    │   ├── haproxy-ingress/            # HAProxy Ingress (one Kubernetes resource per file)
-    │   │   ├── 01-namespace.yaml
-    │   │   ├── 02-service-account.yaml
-    │   │   ├── 03-cluster-role.yaml
-    │   │   ├── 04-cluster-role-binding.yaml
-    │   │   ├── 05-configmap.yaml
-    │   │   ├── 06-deployment.yaml
-    │   │   └── 07-service.yaml
-    │   ├── metrics-server/             # Metrics API (one Kubernetes resource per file)
-    │   │   ├── 01-service-account.yaml
-    │   │   ├── 02-aggregated-metrics-reader-cluster-role.yaml
-    │   │   ├── 03-metrics-server-cluster-role.yaml
-    │   │   ├── 04-auth-reader-role-binding.yaml
-    │   │   ├── 05-auth-delegator-cluster-role-binding.yaml
-    │   │   ├── 06-metrics-server-cluster-role-binding.yaml
-    │   │   ├── 07-service.yaml
-    │   │   ├── 08-deployment.yaml
-    │   │   └── 09-api-service.yaml
-    │   └── local-path/                  # local-path-provisioner + default StorageClass
-    │       ├── local-path-storage.yaml  # Namespace, RBAC, Deployment, StorageClass, ConfigMap
-    │       └── kustomization.yaml
-    │   ├── metallb/                     # MetalLB L2 (LB for services; see "Local DNS" — not the external path)
-    │   │   ├── 00-crds.yaml … 07-webhook.yaml
-    │   │   ├── 02-ipaddresspool.yaml   # 192.168.1.200-250 (LAN)
-    │   │   └── kustomization.yaml
-    │   └── cert-manager/                # Internal *.lan certificates (mkcert CA)
-    │       ├── 00-crds.yaml … 05-webhooks.yaml
-    │       ├── cluster-issuer.yaml     # ClusterIssuer "local-ca" (mkcert CA)
-    │       ├── certificate-dns-lan.yaml# dns.lan + *.lan → secret dns-lan-tls
-    │       ├── kustomization.yaml
-    │       └── secrets/
-    │           └── mkcert-ca.yaml      # mkcert root CA (never commit)
-    ├── argocd/                          # Applications (Argo CD) — Helm charts
-    │   ├── authentik/
-    │   │   ├── 02-application.yaml      # existingSecret: authentik-config (db: shared PostgreSQL)
-    │   │   ├── 03-blueprint.yaml        # OIDC provider/group/app (kubectl apply — never through Helm)
-    │   │   └── secrets/                 # GITIGNORED (never commit)
-    │   │       ├── authentik.env        # app env (AUTHENTIK_* + LITELLM_OIDC_*)
-    │   │       └── postgresql-auth.yaml # PostgreSQL auth (postgres-password/password)
-    │   ├── litellm/
-    │   │   ├── 01-repo-secret.yaml      # OCI repo (ghcr.io/berriai, enableOCI)
-    │   │   ├── 02-application.yaml      # litellm-helm chart + migrations hook (PreSync)
-    │   │   └── secrets/                 # GITIGNORED (never commit)
-    │   │       ├── litellm.env          # app env (OPENAI_API_KEY, PROXY_BASE_URL, OIDC...)
-    │   │       ├── litellm-db.yaml      # PostgreSQL creds (username/password)
-    │   │       └── litellm-masterkey.yaml # proxy master key (masterkey)
-    │   ├── postgres/
-    │   │   ├── 02-application.yaml      # source: this repo (path manifests/postgres)
-    │   │   └── secrets/                 # GITIGNORED (never commit)
-    │   │       └── postgres-superuser.yaml # superuser password (postgres-password)
-    │   ├── prometheus-stack/
-    │   │   ├── 02-application.yaml      # existingSecret: grafana-admin + authentik SSO (grafana.ini)
-    │   │   ├── 03-certificate.yaml      # grafana-tls (grafana.lan) — kubectl apply -f
-    │   │   ├── 04-ingress.yaml          # grafana.lan -> chart Service — kubectl apply -f
-    │   │   └── secrets/
-    │   │       ├── grafana-admin.yaml   # Grafana admin (admin-user/admin-password)
-    │   │       └── grafana-oidc.env     # SSO OIDC client (GF_AUTH_GENERIC_OAUTH_*)
-    ├── postgres/                       # PostgreSQL 18 — shared instance (own manifests, from this repo)
-    │   ├── 01-pvc.yaml                 # PVC postgres-data (5Gi, local-path)
-    │   ├── 02-deployment.yaml          # postgres:18.6 (ns data)
-    │   ├── 03-configmap-initdb.yaml    # init: creates the app roles/databases
-    │   ├── 04-service.yaml             # Service postgres + NodePort 30432
-    │   └── kustomization.yaml
-    ├── apps/                           # On-demand; one Kubernetes resource per YAML file
-    │   ├── kustomization.yaml          # Composes the app directories
-    │   └── tileserver/                 # TileServer GL
+    │   ├── argocd/                     # Namespace for Argo CD
+    │   ├── cert-manager/               # Internal *.lan certificates (mkcert CA)
+    │   ├── coredns/                    # CoreDNS + .lan hosts block
+    │   ├── haproxy-ingress/            # HAProxy Ingress Controller
+    │   ├── local-path/                 # local-path-provisioner + default StorageClass
+    │   ├── metallb/                    # MetalLB L2 (LoadBalancer VIP)
+    │   └── metrics-server/             # metrics.k8s.io API
+    ├── argocd/                         # Argo CD Applications (one dir per app)
+    │   ├── authentik/                  # Helm chart + blueprint + secrets/
+    │   ├── litellm/                    # OCI chart + secrets/
+    │   ├── odoo/                       # Application (source: this repo)
+    │   ├── opensearch/                 # Application (source: this repo)
+    │   ├── pgadmin/                    # Application (source: this repo)
+    │   ├── postgres/                   # Application (source: this repo)
+    │   ├── prometheus-stack/           # Helm chart + ingress/cert
+    │   ├── redis/                      # Application (source: this repo)
+    │   └── vaultwarden/                # Application (source: this repo)
+    ├── networking/
+    │   └── adguard/                    # AdGuard Home (LAN/tailnet DNS)
+    ├── ops/
+    │   ├── argocd/                     # Ingress + Certificate for argocd.lan (versioned)
+    │   └── headlamp/                   # Dashboard, oauth2-proxy, ingress/cert
+    │       └── plugin-logout/          # Custom "Sair" plugin (ConfigMap)
+    ├── odoo/                           # Odoo (own manifests — source of the Application)
+    ├── opensearch/                     # OpenSearch + Dashboards (own manifests)
+    ├── pgadmin/                        # pgAdmin 4 (own manifests)
+    ├── postgres/                       # PostgreSQL 18 shared instance (own manifests)
+    ├── redis/                          # Redis (own manifests)
+    ├── vaultwarden/                    # Vaultwarden (own manifests)
+    └── apps/                           # GITIGNORED — on demand via deploy-apps.sh
+        └── tileserver/                 # TileServer GL (hostpath-tiles PVC)
 ```
 
 ---
@@ -722,7 +687,7 @@ All certificates have a validity of **10 years** (3650 days).
 - **kube-proxy replacement**: disabled (kube-proxy runs alongside)
 - **Hubble**: ✅ observability & monitoring
 
-Cilium is installed via the Cilium CLI, which manages the Helm chart and provides status monitoring. It is **fully uninstalled and reinstalled on every boot** (the in-memory BPF datapath does not survive a container restart).
+Cilium is installed via the Cilium CLI, which manages the Helm chart and provides status monitoring. The entrypoint reinstalls it on **every boot**: its `cilium_healthy()` check runs `cilium status --brief`, a flag that does not exist in CLI v0.19.4, so the check always fails and forces a clean reinstall. That reinstall is load-bearing — after the `k8s-one` container is recreated, the pod→ClusterIP datapath is left stale and only reinstalling Cilium restores it.
 
 ### kube-proxy
 
@@ -742,7 +707,7 @@ It is an explicit list, not a wildcard: the `hosts` plugin only gained wildcard 
 
 ### Local DNS (AdGuard) & Internal Certificates
 
-**AdGuard Home** (`apps/adguard`) is the LAN/tailnet DNS and resolves the internal `*.lan` names to the cluster. CoreDNS still owns `cluster.local` (in-cluster DNS) — AdGuard is for accessing apps by name.
+**AdGuard Home** (`networking/adguard`) is the LAN/tailnet DNS and resolves the internal `*.lan` names to the cluster. CoreDNS still owns `cluster.local` (in-cluster DNS) — AdGuard is for accessing apps by name.
 
 Flow of a request to `https://dns.lan` (AdGuard dashboard):
 
@@ -756,7 +721,7 @@ device → AdGuard (192.168.1.20:53)
 - **Why `.lan`, not `.local`**: `.local` is reserved for mDNS (RFC 6762). Android and macOS resolve `.local` via mDNS and **never** via unicast DNS — so `dns.local` fails on those devices even with the right DNS. `.lan` goes through the normal unicast resolver.
 - **AdGuard rewrite**: `dns.lan → 192.168.1.20` (the host's fixed LAN IP — not the MetalLB IP; see below).
 - **External access = host-published ports**: the cluster runs inside an isolated docker network (`192.168.32.0/20`). MetalLB (in `built-in/metallb`) announces its LoadBalancer IP (`192.168.1.200`) **inside that docker network, not on the WiFi** — so it is **not reachable from the LAN**. The real path is `docker-compose` publishing `0.0.0.0:80/443 → NodePort 30080/30443` on the host's physical IP (`192.168.1.20`). The rewrite points to `192.168.1.20`, **not** `192.168.1.200`.
-- **Certificates (cert-manager + mkcert)**: the `ClusterIssuer local-ca` uses the **mkcert root CA** (`~/.local/share/mkcert/rootCA.pem`, imported into Secret `cert-manager/mkcert-ca`). The `Certificate dns-lan` issues `dns.lan` + `*.lan` into Secret `infra/dns-lan-tls`, referenced by the Ingress. To avoid browser warnings, install the mkcert CA into each device's trust store (already done on the host via `mkcert -install`).
+- **Certificates (cert-manager + mkcert)**: the `ClusterIssuer local-ca` uses the **mkcert root CA** (`~/.local/share/mkcert/rootCA.pem`, imported into Secret `cert-manager/mkcert-ca`). The `Certificate dns-lan` issues `dns.lan` + `*.lan` into Secret `networking/dns-lan-tls`, referenced by the Ingress. To avoid browser warnings, install the mkcert CA into each device's trust store (already done on the host via `mkcert -install`).
 - **Tailscale**: global nameserver = `192.168.1.20` and the `192.168.1.0/24` route advertised + approved — tailnet devices resolve `*.lan` via AdGuard and reach `192.168.1.20`. **IPv6 (RA) must be off on the router**: the IPv6 DNS advertisement (`fc00::a/b`) is preferred by Android and breaks `*.lan` resolution.
 
 ### Remote access (outside the LAN, via Tailnet)
@@ -769,31 +734,26 @@ Works from anywhere with Tailscale on: the tailnet DNS (global nameserver `192.1
 > To test access, use the **browser** (it uses the system DNS).
 - **Router (LAN)**: DHCP hands out `192.168.1.20` as primary DNS (optional `1.1.1.1` fallback). Note: with the host down, clients that only have `192.168.1.20` lose DNS.
 
-### Headlamp (`headlamp.lan`)
+## Workloads
 
-Dashboard at `https://headlamp.lan` (ingress routes by Host; mkcert cert `headlamp.lan`). Login é **SSO no Authentik**, feito por um **oauth2-proxy** na frente do Headlamp.
+### Overview
 
-**Arquitetura (por que o proxy):** o Headlamp tem dois modos de OIDC, mutuamente exclusivos:
-- **OIDC nativo**: exige login e encaminha o token do usuário para a API. Como o `kube-apiserver` deste cluster **não** tem flags `--oidc-*`, a API rejeita o token (401, "the cluster did not accept your sign-in").
-- **Service account** (`HEADLAMP_CONFIG_UNSAFE_USE_SERVICE_ACCOUNT_TOKEN=true`): autentica todos pelo SA, mas **não exige login** — só é seguro atrás de um auth proxy.
+Workloads are delivered two ways:
 
-Escolhemos o 2º + um proxy: `navegador → ingress → oauth2-proxy → Headlamp`. O `oauth2-proxy` (ns `ops`, `09-oauth2-proxy.yaml`) faz o OIDC contra o Authentik (provider "Headlamp", redirect `https://headlamp.lan/oauth2/callback`) e guarda a sessão num cookie; o ingress aponta para ele, não para o Headlamp. Sem sessão válida, nada chega ao Headlamp.
+- **Argo CD Applications** — the default: nine Applications, each pointing at a Helm chart (third-party or OCI) or at a path in this repository. The Application manifests live under `manifests/argocd/<app>/`.
+- **`scripts/deploy-apps.sh`** — kustomize, on demand: applies the domain trees under `manifests/` for AdGuard (**networking**), Headlamp and the Argo CD Ingress (**ops**) and the TileServer (**apps**).
 
-RBAC: SA `headlamp-admin` (ns `ops`) → ClusterRole **`headlamp-admin`** — admin amplo, mas **sem `delete` em namespaces, PVs e PVCs** (guarda-corpo de dados; ver `03-cluster-role.yaml`). O login controla quem entra; a permissão na API é a do SA (admin compartilhado).
-
-Env relevante do Headlamp (`05-deployment.yaml`): `HEADLAMP_CONFIG_UNSAFE_USE_SERVICE_ACCOUNT_TOKEN=true` + `HEADLAMP_CONFIG_PROXY_AUTH=true` (confia nos headers `X-Forwarded-*` do proxy). O client_id/secret é o mesmo par `HEADLAMP_OIDC_*` do blueprint, guardado no Secret gitignored `oauth2-proxy` (`create-secrets.sh`), junto do `cookie_secret`.
-
-> Alternativa per-user (não usada): configurar OIDC no próprio `kube-apiserver` (`--oidc-*`) + RBAC por identidade — muda o modelo para per-user e exige rebuild/recreate do container.
-
-**Logout ("Sair"):** o Headlamp não tem logout no servidor (o botão nativo só limpa o token local, e a sessão real é o cookie `_oauth2_proxy`). Por isso há um **plugin próprio** (`plugin-logout/`, montado em `/headlamp/static-plugins/logout` via ConfigMap) que adiciona um botão **Sair** no app bar. Ele vai para `/oauth2/sign_out?rd=<end-session do Authentik>`: limpa o cookie do proxy **e** encerra a sessão SSO no Authentik, voltando para o login. O plugin é escrito à mão em UMD (o Headlamp injeta os módulos em `window.pluginLib`), sem toolchain/npm.
-
-Fallback por token (quando o prompt pede token):
-
-```bash
-kubectl -n ops get secret headlamp-admin-token -o jsonpath='{.data.token}' | base64 -d
-```
-
-The `headlamp-admin-token` secret (type `kubernetes.io/service-account-token`) is long-lived (K8s 1.24+). Since Headlamp runs with `--in-cluster`, it may authenticate automatically via the projected token — the command above is for when the login prompt asks for a token.
+| Application | Source |
+|---|---|
+| `authentik` | Helm chart `authentik` (`goauthentik`) |
+| `kube-prometheus-stack` | Helm chart `kube-prometheus-stack` (`prometheus-community`) |
+| `litellm` | OCI Helm chart `ghcr.io/berriai/litellm-helm` |
+| `odoo` | this repo — `manifests/odoo` |
+| `opensearch` | this repo — `manifests/opensearch` |
+| `pgadmin` | this repo — `manifests/pgadmin` |
+| `postgres` | this repo — `manifests/postgres` |
+| `redis` | this repo — `manifests/redis` |
+| `vaultwarden` | this repo — `manifests/vaultwarden` |
 
 ### Argo CD (`argocd.lan`)
 
@@ -805,7 +765,33 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 ```
 > **Tip:** login uses user `admin` + the password from the secret above (it matches the hash in `argocd-secret`/`admin.password`). If the browser rejects it, check **autofill/cache** (type the password manually; hard refresh or incognito) — it is not the headlamp/dns password.
 
-Ingress/cert manifests: `manifests/apps/argocd/` (gitignored).
+Ingress/cert manifests: `manifests/ops/argocd/` (versioned in this repo).
+
+### Headlamp (`headlamp.lan`)
+
+Dashboard at `https://headlamp.lan` (ingress routes by Host; mkcert cert `headlamp.lan`). Login is **SSO through Authentik**, via an **oauth2-proxy** in front of Headlamp.
+
+**Architecture (why the proxy):** Headlamp has two mutually exclusive OIDC modes:
+- **Native OIDC**: requires login and forwards the user's token to the API. Since this cluster's `kube-apiserver` has **no** `--oidc-*` flags, the API rejects the token (401, "the cluster did not accept your sign-in").
+- **Service account** (`HEADLAMP_CONFIG_UNSAFE_USE_SERVICE_ACCOUNT_TOKEN=true`): authenticates everyone through the SA, but **requires no login** — safe only behind an auth proxy.
+
+We chose the 2nd + a proxy: `browser → ingress → oauth2-proxy → Headlamp`. The `oauth2-proxy` (ns `ops`, `09-oauth2-proxy.yaml`) runs the OIDC against Authentik (provider "Headlamp", redirect `https://headlamp.lan/oauth2/callback`) and keeps the session in a cookie; the ingress points at it, not at Headlamp. Without a valid session, nothing reaches Headlamp.
+
+RBAC: SA `headlamp-admin` (ns `ops`) → ClusterRole **`headlamp-admin`** — broad admin, but **without `delete` on namespaces, PVs and PVCs** (a data guardrail; see `03-cluster-role.yaml`). Login controls who gets in; the API permission is the SA's (shared admin).
+
+Relevant Headlamp env (`05-deployment.yaml`): `HEADLAMP_CONFIG_UNSAFE_USE_SERVICE_ACCOUNT_TOKEN=true` + `HEADLAMP_CONFIG_PROXY_AUTH=true` (trusts the proxy's `X-Forwarded-*` headers). The client_id/secret is the same `HEADLAMP_OIDC_*` pair from the blueprint, stored in the gitignored `oauth2-proxy` Secret (`create-secrets.sh`), together with the `cookie_secret`.
+
+> Per-user alternative (not used): configure OIDC on the `kube-apiserver` itself (`--oidc-*`) + per-identity RBAC — it changes the model to per-user and requires rebuilding/recreating the container.
+
+**Logout ("Sair"):** Headlamp has no server-side logout (the native button only clears the local token, and the real session is the `_oauth2_proxy` cookie). That is why there is a **custom plugin** (`plugin-logout/`, mounted at `/headlamp/static-plugins/logout` via ConfigMap) that adds a **Sair** button to the app bar. It goes to `/oauth2/sign_out?rd=<Authentik end-session>`: it clears the proxy cookie **and** ends the SSO session at Authentik, returning to the login. The plugin is hand-written in UMD (Headlamp injects the modules into `window.pluginLib`), with no toolchain/npm.
+
+Token fallback (when the prompt asks for a token):
+
+```bash
+kubectl -n ops get secret headlamp-admin-token -o jsonpath='{.data.token}' | base64 -d
+```
+
+The `headlamp-admin-token` secret (type `kubernetes.io/service-account-token`) is long-lived (K8s 1.24+). Since Headlamp runs with `--in-cluster`, it may authenticate automatically via the projected token — the command above is for when the login prompt asks for a token.
 
 ### Authentik (`authentik.lan`)
 
@@ -838,7 +824,7 @@ kubectl -n platform get secret authentik-config -o jsonpath='{.data.AUTHENTIK_BO
 
 ### LiteLLM (`litellm.lan`)
 
-OpenAI-compatible proxy at `https://litellm.lan` (Ingress ns `platform` → `litellm:4000`, dedicated mkcert cert `litellm-tls`). It replaces the LiteLLM that used to run in the `infra/` docker-compose stack; the database is **the cluster's shared PostgreSQL 18** (ns `data`, database `litellm`, `?schema=litellm`) — the same instance that serves the Authentik, in a database of its own.
+OpenAI-compatible proxy at `https://litellm.lan` (Ingress ns `platform` → `litellm:4000`, dedicated mkcert cert `litellm-tls`). The database is **the cluster's shared PostgreSQL 18** (ns `data`, database `litellm`, `?schema=litellm`) — the same instance that serves the Authentik, in a database of its own.
 
 **DNS:** `litellm.lan` must be added as a rewrite in AdGuard (`Filters → DNS rewrites` → `192.168.1.20`), like the other `.lan` names. AdGuard rewrites are **per host, not wildcards**, and the config lives inside the `adguard-conf-fs` PVC (not in this repo), so this is a manual one-time step.
 
@@ -889,17 +875,45 @@ Three details that are expensive to get wrong:
 
 Manifests: `manifests/argocd/prometheus-stack/`. Secrets: see the table above.
 
-### PostgreSQL (data)
+### Namespace `data`
 
-The cluster's **shared database instance**: one PostgreSQL 18.6 — the official `postgres:18.6` image, no chart — in namespace `data`, serving both apps that need a real SQL database, each in its **own database and role**: `litellm` (role `litellm`, schema `litellm`, Prisma's) and `authentik` (role `authentik`, Django's). One instance, two tenants: the roles are created with least privilege (`NOSUPERUSER NOCREATEDB NOCREATEROLE`) and the superuser never leaves the pod.
+The apps in namespace `data` are "app-style": their own manifests in `manifests/<app>/` plus an Application in `manifests/argocd/<app>/`, with `local-path` PVCs. It hosts the shared database and the supporting services around it.
+
+#### PostgreSQL (data)
+
+The cluster's **shared database instance**: one PostgreSQL 18.6 — the official `postgres:18.6` image, no chart — in namespace `data`, serving the apps that need a real SQL database, each in its **own database and role**: `litellm` (role `litellm`, schema `litellm`, Prisma's), `authentik` (role `authentik`, Django's) and `odoo` (role `odoo`). One instance, three tenants: the roles are created with least privilege (`NOSUPERUSER NOCREATEDB NOCREATEROLE`) and the superuser never leaves the pod.
 
 Its manifests are versioned in this repo, under `manifests/postgres/`, because there is no upstream chart to pin — only the official image. The Application `postgres` (`manifests/argocd/postgres/02-application.yaml`) therefore follows the vaultwarden pattern: `source` pointing at this repository, `path: manifests/postgres`, where a `kustomization.yaml` composes the PVC, the Deployment, the init ConfigMap and the Service (Argo CD detects kustomize on its own). The PVC carries `Prune=false,Delete=false` — it holds real data and must not vanish when the Application is pruned or deleted.
 
-In-cluster the address is `postgres.data.svc.cluster.local:5432`, which is how LiteLLM and Authentik connect. From the host, the Service is a NodePort (`30432`) that `docker-compose` publishes as `127.0.0.1:5432:30432` — **loopback on purpose**: every other published port exists so the LAN can reach the host, but the database must not leave it. NodePort and not LoadBalancer for the same reason the ingresses are: the MetalLB VIP is announced inside the cluster's docker network and is unreachable from the LAN. And `30432` and not `5432` because a NodePort has to sit in the apiserver's 30000-32767 range.
+In-cluster the address is `postgres.data.svc.cluster.local:5432`, which is how LiteLLM, Authentik and Odoo connect. From the host, the Service is a NodePort (`30432`) that `docker-compose` publishes as `127.0.0.1:5432:30432` — **loopback on purpose**: every other published port exists so the LAN can reach the host, but the database must not leave it. NodePort and not LoadBalancer for the same reason the ingresses are: the MetalLB VIP is announced inside the cluster's docker network and is unreachable from the LAN. And `30432` and not `5432` because a NodePort has to sit in the apiserver's 30000-32767 range.
 
 Authentication is `scram-sha-256` for every remote connection: the image's entrypoint appends `host all all all scram-sha-256` to `pg_hba.conf`, and that line catches all TCP — including the traffic that arrives through the NodePort. The only `trust` left is the unix socket and the loopback *inside* the pod (initdb's default), unreachable from outside, since NodePort traffic arrives with the client's source IP, never `127.0.0.1`. `POSTGRES_HOST_AUTH_METHOD` is deliberately left unset — setting it to `trust` would be a passwordless superuser. The superuser password lives in the gitignored Secret `postgres-superuser`; each application only ever receives the credentials of its own role, in Secrets applied to **both** `platform` and `data` (see [Secrets](#secrets)).
 
 > **The volume mounts at `/var/lib/postgresql`, not at `/var/lib/postgresql/data`.** In PostgreSQL 18 the image moved `PGDATA` to `/var/lib/postgresql/18/docker` with the `VOLUME` declared on the parent, and mounting at the v15–v17 path makes the entrypoint abort at boot with "there appears to be PostgreSQL data in: /var/lib/postgresql/data (unused mount/volume)". Leaving `PGDATA` at its default is also what keeps `pg_upgrade --link` viable for a future major upgrade.
+
+#### Redis
+
+Single-node cache in namespace `data`: a `redis:8-alpine` StatefulSet with AOF+RDB persistence, a 1Gi `local-path` PVC and a ClusterIP Service at `redis.data.svc:6379`. The password comes from the `redis-auth` Secret and is passed as `--requirepass` on the command line — `redis.conf` does not expand environment variables, so it cannot live in the ConfigMap. **In-cluster access only**: no NodePort, no Ingress, no external exposure — a deliberate decision.
+
+#### OpenSearch + Dashboards
+
+`opensearchproject/opensearch:3.3.2`, single-node, with the security plugin **disabled** (`DISABLE_SECURITY_PLUGIN=true` — no internal auth/TLS), a 512m heap and `bootstrap.memory_lock`, a 10Gi `local-path` PVC and a ClusterIP Service on 9200/9600. The UI is `opensearchproject/opensearch-dashboards:3.0.0` at `https://opensearch.lan` (Ingress + Certificate in namespace `data`). Requires `vm.max_map_count>=262144` on the host (already set).
+
+#### pgAdmin
+
+`dpage/pgadmin4:9.12.0`, login from the `pgadmin-credentials` Secret, with a `servers.json` ConfigMap that already points at the cluster's PostgreSQL (`postgres:5432`), a 2Gi `local-path` PVC and a UI at `https://pgadmin.lan`. It runs **non-root** (uid 5050) without privilege escalation: because the image's Python carries the file capability `cap_net_bind_service`, `drop [ALL] + add NET_BIND_SERVICE` is kept in the bounding set (otherwise the Python exec fails with EPERM); `PGADMIN_DISABLE_POSTFIX=1` removes the only `sudo`, and it listens on 8080 (`PGADMIN_LISTEN_PORT`). Measured in the pod: uid 5050 and CapEff=0.
+
+### Vaultwarden (`vault.lan`)
+
+Bitwarden vault at `https://vault.lan` (namespace `vaultwarden`). An Argo CD Application from this repository (`manifests/vaultwarden`), with a 1Gi `local-path` PVC and mkcert TLS.
+
+### Odoo (`odoo.lan`)
+
+ERP at `https://odoo.lan` (namespace `odoo`). An Argo CD Application from this repository (`manifests/odoo`), with a 5Gi `local-path` PVC; its database lives in the shared PostgreSQL (database/role `odoo`, credentials in `odoo-db`).
+
+### TileServer (`tiles.naesquina.com.br`)
+
+Map tiles at `https://tiles.naesquina.com.br` (namespace `tileserver`). Applied **on demand** by `scripts/deploy-apps.sh` (`manifests/apps/tileserver`, the only gitignored tree), from a `hostpath-tiles` PVC (Reclaim `Retain`, `ReadOnlyMany`) — not `local-path`.
 
 ---
 
@@ -929,10 +943,6 @@ Volumes are **not redundant**: they live as plain directories on the host disk
 under `data/local-path/`. Back that directory up if the data matters. Since
 `local-path` has no online expansion, PVC sizes are fixed (`allowVolumeExpansion`
 is unset).
-
-> **History.** Until 26/09/2026 storage was Rook-Ceph (RBD + CephFS). It was
-> replaced by local-path-provisioner: the single-node Ceph consumed ~2 GiB of
-> requests and ~700m of CPU and was prone to nbd/OSD deadlocks.
 
 ---
 
