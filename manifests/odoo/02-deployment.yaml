@@ -43,6 +43,44 @@ spec:
         runAsNonRoot: true
         fsGroup: 101
         fsGroupChangePolicy: OnRootMismatch
+      # Addons da comunidade (OCA) vêm por initContainer: clona o repo, fixa um
+      # COMMIT e copia só os módulos desejados para o emptyDir montado em
+      # /mnt/extra-addons (que já é o addons_path do /etc/odoo/odoo.conf da
+      # imagem). Assim o módulo SOBREVIVE a restart/resync do Argo — não vive no
+      # overlay do container. Para atualizar a versão:
+      #   git ls-remote https://github.com/OCA/contract refs/heads/19.0
+      # e troque o SHA abaixo.
+      initContainers:
+        - name: oca-addons
+          image: alpine/git:2.45.2
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              SHA=91ea363d15afc0158aa1dcca8b533be342b34824   # OCA/contract branch 19.0
+              mkdir -p /tmp/oca && cd /tmp/oca
+              git init -q .
+              git remote add origin https://github.com/OCA/contract.git
+              git fetch -q --depth 1 origin "$SHA" || git fetch -q --depth 1 origin 19.0
+              git checkout -q FETCH_HEAD
+              cp -r contract /mnt/extra-addons/
+              cp -r contract_sale /mnt/extra-addons/
+              echo "addons prontos: $(ls /mnt/extra-addons)"
+          env:
+            - name: HOME
+              value: /tmp
+          securityContext:
+            runAsUser: 100
+            runAsGroup: 101
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: addons
+              mountPath: /mnt/extra-addons
       containers:
         - name: odoo
           image: odoo:19.0
@@ -97,6 +135,9 @@ spec:
             # criaria falha silenciosa; o endurecimento fica para depois.
             - name: tmp
               mountPath: /tmp
+            # Addons da OCA (populados pelo initContainer `oca-addons`).
+            - name: addons
+              mountPath: /mnt/extra-addons
           resources:
             # Modesto de propósito: o cluster está apertado de RAM (nó só com
             # ~8 GiB alocáveis, swap do host cheia). 1 worker implícito.
@@ -134,4 +175,7 @@ spec:
           persistentVolumeClaim:
             claimName: odoo-data
         - name: tmp
+          emptyDir: {}
+        # Addons da comunidade (OCA/contract) — preenchido pelo initContainer.
+        - name: addons
           emptyDir: {}
