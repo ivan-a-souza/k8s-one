@@ -1,9 +1,15 @@
 # Vaultwarden — Deployment.
 #
 # Mesmo serviço que rodava no docker-compose do infra (vaultwarden/server),
-# agora no cluster. A versão fica PINADA na mesma que estava em produção no
-# dia da migração (1.36.0) para não somar "mudança de versão" ao risco da
-# migração; upgrade é decisão separada, depois.
+# agora no cluster.
+#
+# IMAGEM: build `testing` (master) PINADA por digest. Os clientes Bitwarden
+# 2026.9.0 (CLI e extensão, que auto-atualiza) rodam no login um "Encrypted
+# Migrator" que faz POST /api/accounts/key-management/user-key-id; o 1.37.3
+# (última release) NÃO tem essa rota -> 404 -> o migrator aborta e o cofre não
+# carrega (spinner no web e na extensão). O PR #7693 corrige isso e já está no
+# master (build testing de 25/09). Voltar para a tag estável quando sair 1.37.4.
+# Upstream: dani-garcia/vaultwarden#7750.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,7 +33,7 @@ spec:
     spec:
       containers:
         - name: vaultwarden
-          image: vaultwarden/server:1.37.3
+          image: vaultwarden/server@sha256:19d37163b917f46a69fab8570ce6e2028524de3f77eda6fbcec3aa7cbefc88b4
           imagePullPolicy: IfNotPresent
           envFrom:
             # ADMIN_TOKEN, SIGNUPS_ALLOWED, DOMAIN, ROCKET_PORT.
