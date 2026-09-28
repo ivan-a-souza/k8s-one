@@ -93,5 +93,10 @@ apply_yaml_secret manifests/argocd/odoo/secrets/odoo-db.yaml
 # a role com essa senha (o banco vive em `data`, o app em `odoo`).
 apply_yaml_secret_in_ns data manifests/argocd/odoo/secrets/odoo-db.yaml
 
+# redis — senha do cache (chave password), lida como REDIS_PASSWORD (requirepass).
+apply_yaml_secret manifests/argocd/redis/secrets/redis-auth.yaml
+# pgadmin — login inicial (chaves PGADMIN_DEFAULT_EMAIL / PGADMIN_DEFAULT_PASSWORD).
+apply_yaml_secret manifests/argocd/pgadmin/secrets/pgadmin-credentials.yaml
+
 echo "OK: secrets aplicados."
 apply_env_secret vaultwarden vaultwarden-env manifests/argocd/vaultwarden/secrets/vaultwarden.env

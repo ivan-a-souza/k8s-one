@@ -1,0 +1,19 @@
+# OpenSearch API: so in-cluster (opensearch.data.svc:9200). Sem exposicao externa.
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch
+  namespace: data
+  labels:
+    app: opensearch
+spec:
+  type: ClusterIP
+  selector:
+    app: opensearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: http
+    - name: performance
+      port: 9600
+      targetPort: performance

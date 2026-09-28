@@ -1,0 +1,29 @@
+# Argo CD Application do pgAdmin no ns `data`.
+#
+# Fonte: o PRÓPRIO repo GitOps (k8s-one), caminho manifests/pgadmin.
+# UI publicada em https://pgadmin.lan (Ingress + Certificate no proprio ns).
+#
+# Segredo `pgadmin-credentials` NÃO está no repo (gitignored) — criar com:
+#   scripts/create-secrets.sh
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pgadmin
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ivan-a-souza/k8s-one.git
+    targetRevision: main
+    path: manifests/pgadmin
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: data
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

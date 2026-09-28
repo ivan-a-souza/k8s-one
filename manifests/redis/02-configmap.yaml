@@ -1,0 +1,48 @@
+# Configuracao do Redis. A senha NAO fica aqui: e passada como
+# `--requirepass "$REDIS_PASSWORD"` no command do StatefulSet (o redis.conf
+# NAO expande variaveis de ambiente — deixar `${REDIS_PASSWORD}` no arquivo
+# gravaria a senha literalmente entre cifroes).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: data
+data:
+  redis.conf: |
+    port 6379
+    bind 0.0.0.0 -::1
+    protected-mode yes
+
+    # Comandos perigosos bloqueados
+    rename-command FLUSHALL ""
+    rename-command FLUSHDB  ""
+    rename-command CONFIG   ""
+    rename-command DEBUG    ""
+
+    # Memoria (perfil cache)
+    maxmemory 128mb
+    maxmemory-policy allkeys-lru
+    maxmemory-samples 10
+
+    # Durabilidade (AOF + RDB)
+    dir /data
+    appendonly yes
+    appendfsync everysec
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    save 900 1
+    save 300 10
+    save 60 10000
+    stop-writes-on-bgsave-error yes
+    rdbcompression yes
+    rdbchecksum yes
+
+    # Rede / conexoes
+    tcp-backlog 511
+    tcp-keepalive 300
+    timeout 0
+    maxclients 1000
+
+    # Logs
+    loglevel notice
+    logfile ""

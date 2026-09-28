@@ -1,0 +1,15 @@
+# Certificado do opensearch.lan, emitido pelo ClusterIssuer `local-ca` (mkcert).
+# Certificado por host (o wildcard *.lan e rejeitado por validadores).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: opensearch-tls
+  namespace: data
+spec:
+  secretName: opensearch-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: opensearch.lan
+  dnsNames:
+    - opensearch.lan

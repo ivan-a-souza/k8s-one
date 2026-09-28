@@ -1,0 +1,17 @@
+# OpenSearch — dados no ns `data`, StorageClass local-path (RWO).
+#
+# 10Gi para um indice de lab. local-path NAO expande online.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opensearch-data
+  namespace: data
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi

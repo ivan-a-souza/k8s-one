@@ -1,0 +1,26 @@
+# Argo CD Application do OpenSearch (+ Dashboards) no ns `data`.
+#
+# Fonte: o PRÓPRIO repo GitOps (k8s-one), caminho manifests/opensearch.
+# UI publicada em https://opensearch.lan (Ingress + Certificate no proprio ns).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: opensearch
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ivan-a-souza/k8s-one.git
+    targetRevision: main
+    path: manifests/opensearch
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: data
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

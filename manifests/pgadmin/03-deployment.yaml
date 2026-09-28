@@ -1,0 +1,94 @@
+# pgAdmin 4 no ns `data`.
+#
+# Atrás do HAProxy ingress (TLS terminado no ingress, HTTP para o pod): o
+# pgAdmin so confia nos headers X-Forwarded-* se os *_COUNT correspondentes
+# forem setados — sem isso o redirect/login quebra atras de proxy.
+# ENHANCED_COOKIE_PROTECTION=False pelo mesmo motivo (mesmo ajuste do inf ra).
+#
+# Login inicial: PGADMIN_DEFAULT_EMAIL/_PASSWORD do Secret pgadmin-credentials.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgadmin
+  namespace: data
+  labels:
+    app: pgadmin
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pgadmin
+  template:
+    metadata:
+      labels:
+        app: pgadmin
+    spec:
+      securityContext:
+        runAsUser: 5050
+        runAsGroup: 5050
+        fsGroup: 5050
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: pgadmin
+          image: dpage/pgadmin4:9.12.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: pgadmin-credentials
+          env:
+            - name: PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION
+              value: "False"
+            - name: PGADMIN_CONFIG_PROXY_X_FOR_COUNT
+              value: "1"
+            - name: PGADMIN_CONFIG_PROXY_X_PROTO_COUNT
+              value: "1"
+            - name: PGADMIN_CONFIG_PROXY_X_HOST_COUNT
+              value: "1"
+            - name: PGADMIN_CONFIG_PROXY_X_PORT_COUNT
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgadmin
+            - name: servers
+              mountPath: /pgadmin4/servers.json
+              subPath: servers.json
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /misc/ping
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /misc/ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pgadmin-data
+        - name: servers
+          configMap:
+            name: pgadmin-servers

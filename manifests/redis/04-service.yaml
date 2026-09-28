@@ -1,0 +1,18 @@
+# Redis so in-cluster: redis.data.svc.cluster.local:6379.
+# Sem NodePort/LoadBalancer/Ingress de proposito — nao ha exposicao externa.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: data
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP

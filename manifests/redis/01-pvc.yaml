@@ -1,0 +1,20 @@
+# Redis — dados (AOF + RDB) no ns `data`, StorageClass local-path (RWO).
+#
+# 1Gi e folgado para o perfil cache: maxmemory de 128Mi e AOF com
+# auto-rewrite. local-path NAO expande online (sem allowVolumeExpansion);
+# crescer exige recriar o PVC.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: data
+  annotations:
+    # PVC com dado dentro: nunca deixar o Argo podar por engano.
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi

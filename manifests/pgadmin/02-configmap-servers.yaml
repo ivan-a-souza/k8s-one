@@ -1,0 +1,23 @@
+# servers.json — pre-configura, na primeira subida, a conexao com o Postgres do
+# cluster. A SENHA nao vai aqui: o pgAdmin a pede (e guarda cifrada no seu
+# proprio banco, no PVC) na primeira conexao.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgadmin-servers
+  namespace: data
+data:
+  servers.json: |-
+    {
+      "Servers": {
+        "1": {
+          "Name": "Postgres k8s-one",
+          "Group": "Servers",
+          "Host": "postgres",
+          "Port": 5432,
+          "MaintenanceDB": "postgres",
+          "Username": "postgres",
+          "SSLMode": "prefer"
+        }
+      }
+    }

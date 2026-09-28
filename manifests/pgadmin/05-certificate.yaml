@@ -1,0 +1,14 @@
+# Certificado do pgadmin.lan, emitido pelo ClusterIssuer `local-ca` (mkcert).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pgadmin-tls
+  namespace: data
+spec:
+  secretName: pgadmin-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: pgadmin.lan
+  dnsNames:
+    - pgadmin.lan

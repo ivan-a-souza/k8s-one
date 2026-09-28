@@ -1,0 +1,27 @@
+# UI do OpenSearch Dashboards em https://opensearch.lan
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: opensearch-dashboards
+  namespace: data
+  annotations:
+    haproxy.org/ingress.class: haproxy
+    haproxy.org/ssl-cert-namespace: data
+    haproxy.org/ssl-cert: opensearch-tls
+    haproxy.org/timeout-server: "120s"
+spec:
+  tls:
+    - hosts:
+        - opensearch.lan
+      secretName: opensearch-tls
+  rules:
+    - host: opensearch.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: opensearch-dashboards
+                port:
+                  name: http

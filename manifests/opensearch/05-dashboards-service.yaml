@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch-dashboards
+  namespace: data
+  labels:
+    app: opensearch-dashboards
+spec:
+  type: ClusterIP
+  selector:
+    app: opensearch-dashboards
+  ports:
+    - name: http
+      port: 5601
+      targetPort: http

@@ -1,0 +1,66 @@
+# OpenSearch Dashboards (UI) no ns `data`.
+#
+# Fala com o OpenSearch pelo Service interno `opensearch:9200`. Security do
+# Dashboards desabilitada junto com a do cluster (DISABLE_SECURITY_DASHBOARDS_PLUGIN).
+# Sem persistencia: o Dashboards nao guarda estado proprio (dashboards salvos
+# vao para o indice do OpenSearch), entao nao ha PVC.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensearch-dashboards
+  namespace: data
+  labels:
+    app: opensearch-dashboards
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensearch-dashboards
+  template:
+    metadata:
+      labels:
+        app: opensearch-dashboards
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: dashboards
+          image: opensearchproject/opensearch-dashboards:3.0.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OPENSEARCH_HOSTS
+              value: '["http://opensearch:9200"]'
+            - name: DISABLE_SECURITY_DASHBOARDS_PLUGIN
+              value: "true"
+          ports:
+            - name: http
+              containerPort: 5601
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              cpu: 300m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: http
+            initialDelaySeconds: 40
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
