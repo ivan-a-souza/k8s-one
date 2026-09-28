@@ -1,4 +1,4 @@
-# pgAdmin 4 no ns `data`.
+# pgAdmin 4 no ns `data` — roda NAO-ROOT e SEM escalonamento.
 #
 # Atrás do HAProxy ingress (TLS terminado no ingress, HTTP para o pod): o
 # pgAdmin so confia nos headers X-Forwarded-* se os *_COUNT correspondentes
@@ -6,6 +6,19 @@
 # ENHANCED_COOKIE_PROTECTION=False pelo mesmo motivo (mesmo ajuste do inf ra).
 #
 # Login inicial: PGADMIN_DEFAULT_EMAIL/_PASSWORD do Secret pgadmin-credentials.
+#
+# ⚠️ POR QUE `capabilities.add: [NET_BIND_SERVICE]` num container nao-root:
+# o binario /usr/local/bin/python3.14 da imagem tem a FILE-CAPABILITY
+# cap_net_bind_service=eip (para poder bindar a 80 como nao-root). O kernel
+# RECUSA (EPERM) o execve de um binario com file-cap quando a bounding set nao
+# contem essa cap — entao `drop: [ALL]` sozinho quebra o container no primeiro
+# python (`/venv/bin/python3: Operation not permitted`). Manter SO essa cap na
+# bounding set destrava o exec; com allowPrivilegeEscalation=false ela nem
+# chega a ser efetiva em uso, e como o pgAdmin escuta em 8080 (porta
+# nao-privilegiada, via PGADMIN_LISTEN_PORT) ela e dispensavel na pratica.
+#
+# PGADMIN_DISABLE_POSTFIX=1: o postfix era o UNICO uso de `sudo` do entrypoint;
+# desabilitado, o container nao precisa de privilegio nenhum.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,6 +51,12 @@ spec:
             - secretRef:
                 name: pgadmin-credentials
           env:
+            # Elimina o unico `sudo` do entrypoint (postfix).
+            - name: PGADMIN_DISABLE_POSTFIX
+              value: "1"
+            # Escuta em porta nao-privilegiada (nao depende da cap p/ bindar).
+            - name: PGADMIN_LISTEN_PORT
+              value: "8080"
             - name: PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION
               value: "False"
             - name: PGADMIN_CONFIG_PROXY_X_FOR_COUNT
@@ -50,7 +69,7 @@ spec:
               value: "1"
           ports:
             - name: http
-              containerPort: 80
+              containerPort: 8080
           volumeMounts:
             - name: data
               mountPath: /var/lib/pgadmin
@@ -67,8 +86,18 @@ spec:
               memory: 512Mi
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop: ["ALL"]
+              add: ["NET_BIND_SERVICE"]
+          startupProbe:
+            httpGet:
+              path: /misc/ping
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /misc/ping
