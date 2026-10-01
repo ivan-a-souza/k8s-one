@@ -260,7 +260,7 @@ docker compose up -d --force-recreate
 
 | Parameter | Value | Description |
 |---|---|---|
-| `CLUSTER_CIDR` | `192.168.0.0/16` | Pod CIDR (Cilium auto-detects from controller-manager) |
+| `CLUSTER_CIDR` | `192.168.0.0/16` | Pod CIDR (must contain the nodes' allocated podCIDR; passed to the Cilium IPAM and disjoint from `SERVICE_CIDR`) |
 | `SERVICE_CIDR` | `10.96.0.0/12` | ClusterIP CIDR |
 | `CLUSTER_DNS` | `10.96.0.10` | CoreDNS IP |
 
@@ -681,7 +681,7 @@ All certificates have a validity of **10 years** (3650 days).
 ### Cilium
 
 - **Datapath**: eBPF
-- **Pod CIDR**: `192.168.0.0/16` (auto-detected from kube-controller-manager)
+- **Pod CIDR**: `192.168.0.0/16` (set explicitly via `ipam.operator.clusterPoolIPv4PodCIDRList`; must contain nodes' podCIDRs and be disjoint from `SERVICE_CIDR`)
 - **Network Policy**: ✅ supported (CiliumNetworkPolicy + k8s NetworkPolicy)
 - **IPAM**: cluster-pool (default)
 - **kube-proxy replacement**: disabled (kube-proxy runs alongside)

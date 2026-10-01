@@ -8,6 +8,14 @@ set -euo pipefail
 
 NODE_NAME="${NODE_NAME:-k8s-one}"
 ARGOCD_VERSION="${ARGOCD_VERSION:-v3.5.1}"
+# Pod CIDR — precisa CONTER o podCIDR já alocado ao(s) nó(s): o
+# kube-controller-manager recusa iniciar se o podCIDR do nó ficar fora deste
+# range (node-ipam-controller -> "Error building controllers" -> processo morre,
+# e sem controller-manager nenhum DaemonSet — nem o Cilium — é agendado).
+# O nó k8s-one tem podCIDR 192.168.0.0/24, logo 192.168.0.0/16. Deve ser
+# disjunto do SERVICE_CIDR abaixo (10.96.0.0/12) — por isso NÃO usar 10.0.0.0/8,
+# que contém o 10.96.0.0/12. O IPAM do Cilium recebe este mesmo valor (cilium
+# install --set ipam.operator.clusterPoolIPv4PodCIDRList), mantendo tudo alinhado.
 CLUSTER_CIDR="192.168.0.0/16"
 SERVICE_CIDR="10.96.0.0/12"
 CLUSTER_DNS="10.96.0.10"
@@ -30,6 +38,22 @@ SHUTTING_DOWN=0
 
 log()  { echo "[k8s-one] $(date -u '+%H:%M:%S') $*"; }
 die()  { log "FATAL: $*"; exit 1; }
+
+# Finalizers de namespace vivem em spec.finalizers (NÃO metadata.finalizers) e
+# só são alteráveis pelo subrecurso /finalize — um `patch --type merge` em
+# metadata é silenciosamente ignorado ("no change"), deixando o namespace preso
+# em Terminating para sempre. Foi o que travou o reinstall do Cilium
+# (cilium-secrets) e abortou o boot com FATAL. Sem jq/python na imagem, o corpo
+# mínimo do /finalize é montado com printf.
+force_remove_namespace() {
+  local ns=$1
+  [ -n "$ns" ] || return 0
+  printf '{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"%s"},"spec":{"finalizers":[]}}' "$ns" \
+    | kubectl --kubeconfig "$KUBE/admin.conf" replace --raw \
+        "/api/v1/namespaces/$ns/finalize" -f - >/dev/null 2>&1 || true
+  kubectl --kubeconfig "$KUBE/admin.conf" delete ns "$ns" \
+    --force --grace-period=0 --wait=false >/dev/null 2>&1 || true
+}
 
 if [[ ! "$ARGOCD_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   die "ARGOCD_VERSION must use the vX.Y.Z format (received: $ARGOCD_VERSION)"
@@ -629,10 +653,7 @@ cleanup_stale_state() {
     phase=$($kc get ns cilium-secrets -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
     if [ "$phase" = "Terminating" ]; then
       log "Removing cilium-secrets stuck in Terminating..."
-      $kc patch ns cilium-secrets --type merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-      # --wait=false: kubectl would otherwise block until the namespace is gone,
-      # and a wedged namespace hangs the boot indefinitely.
-      $kc delete ns cilium-secrets --force --grace-period=0 --wait=false 2>/dev/null || true
+      force_remove_namespace cilium-secrets
     fi
   fi
 
@@ -643,7 +664,13 @@ cleanup_stale_state() {
     pv=$($kc get volumeattachment "$va" -o jsonpath='{.spec.source.persistentVolumeName}' 2>/dev/null || echo "")
     if [ -n "$pv" ] && ! $kc get pv "$pv" >/dev/null 2>&1; then
       log "Deleting orphan VolumeAttachment $va (PV $pv gone)"
-      $kc delete volumeattachment "$va" 2>/dev/null || true
+      # Remove finalizers first: um finalizer órfão (ex.: CSI de um driver já
+      # removido, como o Rook-Ceph) faz `kubectl delete` bloquear para sempre,
+      # travando TODO o apply_manifests (o boot nunca chega ao READY).
+      # --wait=false garante que um objeto em finalização nunca bloqueie o boot.
+      $kc patch volumeattachment "$va" --type=merge \
+        -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
+      $kc delete volumeattachment "$va" --wait=false 2>/dev/null || true
     fi
   done
 }
@@ -707,9 +734,7 @@ apply_manifests() {
       ns_phase=$($kc get ns cilium-secrets -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
       if [ "$ns_phase" = "Terminating" ]; then
         log "Forcing removal of cilium-secrets (Terminating)..."
-        $kc patch ns cilium-secrets --type merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-        # --wait=false: never block on a possibly-wedged namespace.
-        $kc delete ns cilium-secrets --force --grace-period=0 --wait=false 2>/dev/null || true
+        force_remove_namespace cilium-secrets
       fi
       sleep 2; ns_tries=$((ns_tries - 1))
     done
@@ -738,6 +763,7 @@ apply_manifests() {
       --set cluster.name="$NODE_NAME" \
       --set cluster.id=1 \
       --set kubeProxyReplacement=false \
+      --set ipam.operator.clusterPoolIPv4PodCIDRList="$CLUSTER_CIDR" \
       --wait 2>&1; then
       if ! $kc -n kube-system get ds cilium >/dev/null 2>&1; then
         log "FATAL: Cilium is not available and install failed"
