@@ -1009,6 +1009,32 @@ Cache de nó único no namespace `data`: um StatefulSet `redis:8-alpine` com per
 - O login local (`pgadmin-credentials`) continua como **emergência** (`AUTHENTICATION_SOURCES = ['oauth2', 'internal']`, como no Grafana/ArgoCD).
 - O redirect registrado no provider é `https://pgadmin.lan/oauth2/authorize`. Em OAuth2 não há senha do usuário, então para **salvar** a senha do Postgres o pgAdmin pede um *master password* no primeiro acesso (`MASTER_PASSWORD_REQUIRED`, default).
 
+**Registrar um server (conexão com o PostgreSQL do cluster).** O pgAdmin já sobe com um server compartilhado (`servers.json`): **`Postgres k8s-one`**, `Host=postgres`, `Port=5432`, `MaintenanceDB=postgres`, `Username=postgres`. Como o `pg_hba.conf` exige **`scram-sha-256`** em todo TCP (o `trust` só vale no socket local, dentro do pod), normalmente basta clicar nesse server e digitar a senha — que fica guardada por usuário, cifrada com o *master password*. Para adicionar/editar à mão (*Register → Server → Connection*):
+
+| Campo | Valor |
+|---|---|
+| **Host name/address** | `postgres` (o pod está no mesmo ns `data`; ou `postgres.data.svc.cluster.local`) |
+| **Port** | `5432` |
+| **Maintenance database** | `postgres` |
+| **Username** | `postgres` (superusuário) ou a role de app (`litellm`, `authentik`, `odoo`, `naesquina`) |
+| **Password** | a do Secret correspondente (abaixo) |
+| **SSL mode** (aba SSL) | `prefer` (o PG não serve TLS aqui) |
+
+As senhas vivem em Secrets no ns `data` (nunca no repo). Para ler uma no host:
+
+```bash
+# superusuário (acesso total)
+kubectl -n data get secret postgres-superuser -o jsonpath='{.data.postgres-password}' | base64 -d; echo
+# role odoo
+kubectl -n data get secret odoo-db -o jsonpath='{.data.password}' | base64 -d; echo
+# role litellm
+kubectl -n data get secret litellm-db -o jsonpath='{.data.password}' | base64 -d; echo
+# role authentik
+kubectl -n data get secret authentik-postgresql-auth -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+Bancos e donos atuais: `postgres`→postgres, `authentik`→authentik, `litellm`→litellm, `odoo`→odoo (`CREATEDB`), `naesquina`/`naesquina_test`→naesquina. As roles de app são `NOSUPERUSER/NOCREATEDB` (*least privilege*); o `postgres` só é necessário para administração da instância.
+
 ### Vaultwarden (`vault.lan`)
 
 Cofre Bitwarden em `https://vault.lan` (namespace `vaultwarden`). Application do Argo CD deste repositório (`manifests/vaultwarden`), com PVC `local-path` de 1Gi e TLS mkcert.
