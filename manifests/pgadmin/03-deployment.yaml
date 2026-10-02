@@ -67,6 +67,39 @@ spec:
               value: "1"
             - name: PGADMIN_CONFIG_PROXY_X_PORT_COUNT
               value: "1"
+            # --- SSO pelo Authentik (provider `PgAdmin` no blueprint) ---
+            # O pgAdmin le o provider SOMENTE da lista OAUTH2_CONFIG: vars
+            # individuais (PGADMIN_CONFIG_OAUTH2_CLIENT_ID etc.) sao ignoradas
+            # (com warning no boot). O par client_id/secret vem do Secret
+            # `pgadmin-oidc` e e injetado via $(...) — o segredo nao fica aqui.
+            - name: PGADMIN_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: pgadmin-oidc
+                  key: PGADMIN_OIDC_CLIENT_ID
+            - name: PGADMIN_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: pgadmin-oidc
+                  key: PGADMIN_OIDC_CLIENT_SECRET
+            # 'internal' fica como login de emergencia (como Grafana/ArgoCD).
+            - name: PGADMIN_CONFIG_AUTHENTICATION_SOURCES
+              value: "['oauth2', 'internal']"
+            # Discovery do Authentik (issuer = slug `pgadmin`): o id_token e
+            # validado via JWKS e o usuario local e criado no 1o login.
+            # OAUTH2_ADDITIONAL_CLAIMS e o gate do lado do pgAdmin (grupo
+            # pgadmin-users) — defesa em profundidade alem do binding do IdP.
+            - name: PGADMIN_CONFIG_OAUTH2_CONFIG
+              value: "[{'OAUTH2_NAME':'authentik','OAUTH2_DISPLAY_NAME':'Authentik','OAUTH2_CLIENT_ID':'$(PGADMIN_OIDC_CLIENT_ID)','OAUTH2_CLIENT_SECRET':'$(PGADMIN_OIDC_CLIENT_SECRET)','OAUTH2_SERVER_METADATA_URL':'https://authentik.lan/application/o/pgadmin/.well-known/openid-configuration','OAUTH2_SCOPE':'openid email profile','OAUTH2_USERNAME_CLAIM':'preferred_username','OAUTH2_ICON':'fa-key','OAUTH2_ADDITIONAL_CLAIMS':{'groups':['pgadmin-users']}}]"
+            # O pgAdmin valida o id_token contra o JWKS do authentik.lan: precisa
+            # confiar na raiz do mkcert. O ca.crt vem do secret `pgadmin-tls`
+            # (todo secret tls do cert-manager carrega a CA da emissora).
+            # REQUESTS_CA_BUNDLE cobre o `requests` (token/JWKS) e SSL_CERT_FILE
+            # cobre o contexto ssl do Python.
+            - name: REQUESTS_CA_BUNDLE
+              value: /etc/pgadmin/mkcert-ca/ca.crt
+            - name: SSL_CERT_FILE
+              value: /etc/pgadmin/mkcert-ca/ca.crt
           ports:
             - name: http
               containerPort: 8080
@@ -76,6 +109,9 @@ spec:
             - name: servers
               mountPath: /pgadmin4/servers.json
               subPath: servers.json
+              readOnly: true
+            - name: mkcert-ca
+              mountPath: /etc/pgadmin/mkcert-ca
               readOnly: true
           resources:
             requests:
@@ -121,3 +157,9 @@ spec:
         - name: servers
           configMap:
             name: pgadmin-servers
+        - name: mkcert-ca
+          secret:
+            secretName: pgadmin-tls
+            items:
+              - key: ca.crt
+                path: ca.crt

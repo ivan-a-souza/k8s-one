@@ -97,6 +97,11 @@ apply_yaml_secret_in_ns data manifests/argocd/odoo/secrets/odoo-db.yaml
 apply_yaml_secret manifests/argocd/redis/secrets/redis-auth.yaml
 # pgadmin — login inicial (chaves PGADMIN_DEFAULT_EMAIL / PGADMIN_DEFAULT_PASSWORD).
 apply_yaml_secret manifests/argocd/pgadmin/secrets/pgadmin-credentials.yaml
+# pgadmin — client OIDC do SSO (chaves PGADMIN_OIDC_CLIENT_ID / _SECRET),
+# consumido pelo Deployment via secretKeyRef. Os MESMOS valores estão em
+# authentik.env como PGADMIN_OIDC_* — o blueprint registra o client, o pgAdmin
+# o apresenta (uma credencial, dois secrets).
+apply_env_secret data pgadmin-oidc manifests/argocd/pgadmin/secrets/pgadmin-oidc.env
 
 echo "OK: secrets aplicados."
 apply_env_secret vaultwarden vaultwarden-env manifests/argocd/vaultwarden/secrets/vaultwarden.env

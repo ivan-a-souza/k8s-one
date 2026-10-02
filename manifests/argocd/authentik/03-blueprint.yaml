@@ -403,3 +403,92 @@ data:
           group: !KeyOf grafana-admins-group
           order: 1
           enabled: true
+
+  # Provider OIDC do pgAdmin (ns data). O pgAdmin fala OIDC NATIVAMENTE com
+  # discovery (`OAUTH2_SERVER_METADATA_URL`): o Authentik so entrega os claims,
+  # o pgAdmin valida o id_token (JWKS) e cria o usuario local no 1o login —
+  # mesmo modelo do grafana-oidc (sem proxy na frente).
+  #
+  # Diferente do Grafana, o gate aqui e DUPLO: o binding abaixo decide quem
+  # ENTRA (o Authentik recusa o token para quem nao e do grupo) e, do lado do
+  # pgAdmin, o `OAUTH2_ADDITIONAL_CLAIMS` exige `groups: [pgadmin-users]` no
+  # id_token. Para isso funcionar, `include_claims_in_id_token: true` — senao o
+  # claim `groups` so viria no userinfo (segunda chamada).
+  pgadmin-oidc.yaml: |
+    version: 1
+    metadata:
+      name: pgadmin-oidc
+      labels:
+        blueprints.goauthentik.io/description: Provider OIDC do pgAdmin (k8s-one)
+    entries:
+      # Grupo que controla quem entra no pgAdmin.
+      - model: authentik_core.group
+        id: pgadmin-group
+        identifiers:
+          name: pgadmin-users
+        attrs:
+          name: pgadmin-users
+          users:
+            - !Find [authentik_core.user, [username, akadmin]]
+
+      - model: authentik_providers_oauth2.oauth2provider
+        id: pgadmin-provider
+        identifiers:
+          name: PgAdmin
+        attrs:
+          name: PgAdmin
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+          client_type: confidential
+          # ArrayField com default vazio: sem declarar, o provider recusa todo
+          # grant (ver a nota no provider do litellm).
+          grant_types:
+            - authorization_code
+            - refresh_token
+          client_id: !Env PGADMIN_OIDC_CLIENT_ID
+          client_secret: !Env PGADMIN_OIDC_CLIENT_SECRET
+          signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+          # O `sub` e hasheado (nao vaza o usuario). O pgAdmin NAO usa o sub
+          # como login: o username sai de `preferred_username`/`email` (scope
+          # profile), via OAUTH2_USERNAME_CLAIM no Deployment.
+          sub_mode: hashed_user_id
+          # id_token carrega os mesmos claims do userinfo — deixa o
+          # OAUTH2_ADDITIONAL_CLAIMS (grupo pgadmin-users) resolver no proprio
+          # token, sem depender de uma segunda chamada ao userinfo.
+          include_claims_in_id_token: true
+          redirect_uris:
+            # Callback nativo do pgAdmin. Precisa bater EXATAMENTE com a URL
+            # que o pgAdmin monta atras do ingress (https://pgadmin.lan/oauth2/authorize).
+            - matching_mode: strict
+              url: https://pgadmin.lan/oauth2/authorize
+          property_mappings:
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-openid"]]
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-email"]]
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-profile"]]
+
+      - model: authentik_core.application
+        id: pgadmin-app
+        identifiers:
+          slug: pgadmin
+        attrs:
+          name: pgAdmin
+          slug: pgadmin
+          provider: !KeyOf pgadmin-provider
+          # O slug define o issuer/discovery em /application/o/pgadmin/ — e a
+          # URL que o `OAUTH2_SERVER_METADATA_URL` do pgAdmin consulta.
+          meta_launch_url: https://pgadmin.lan
+          meta_description: Administracao do PostgreSQL do cluster
+          meta_publisher: k8s-one
+          policy_engine_mode: any
+
+      # Binding de entrada: sem ele o provider existe mas ninguem autoriza.
+      - model: authentik_policies.policybinding
+        id: pgadmin-app-binding
+        identifiers:
+          target: !KeyOf pgadmin-app
+          group: !KeyOf pgadmin-group
+        attrs:
+          target: !KeyOf pgadmin-app
+          group: !KeyOf pgadmin-group
+          order: 0
+          enabled: true

@@ -349,7 +349,8 @@ os Secrets via `existingSecret` — nunca contêm senha.
 | `oauth2-proxy` | `ops` | `manifests/ops/headlamp/secrets/oauth2-proxy.env` | client OIDC do oauth2-proxy + `cookie_secret` |
 | `odoo-db` | `odoo` + `data` | `manifests/argocd/odoo/secrets/odoo-db.yaml` | role `odoo` no PostgreSQL |
 | `redis-auth` | `data` | `manifests/argocd/redis/secrets/redis-auth.yaml` | `requirepass` do Redis |
-| `pgadmin-credentials` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-credentials.yaml` | login inicial do pgAdmin |
+| `pgadmin-credentials` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-credentials.yaml` | login inicial (interno) do pgAdmin |
+| `pgadmin-oidc` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-oidc.env` | client OIDC do pgAdmin (`PGADMIN_OIDC_*`), lido via `secretKeyRef` |
 | `vaultwarden-env` | `vaultwarden` | `manifests/argocd/vaultwarden/secrets/vaultwarden.env` | env do Vaultwarden (`ADMIN_TOKEN`, `DOMAIN`, …) |
 
 Formatos:
@@ -888,7 +889,7 @@ O secret `headlamp-admin-token` (tipo `kubernetes.io/service-account-token`) é 
 
 ### Authentik (`authentik.lan`)
 
-Provedor de identidade em `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, cert mkcert `authentik-tls`). O banco é o **PostgreSQL 18 compartilhado do namespace `data`** (ver [PostgreSQL (data)](#postgresql-data) abaixo) — banco `authentik`, dono a role `authentik` — por isso o `postgresql:` embutido do chart está `enabled: false` e a conexão vem inteira do Secret `authentik-config` (`AUTHENTIK_POSTGRESQL__*`, entregue ao server e ao worker por `envFrom`). Está aqui para ser o **login único** dos apps do cluster; ligados nele até agora: LiteLLM, Headlamp e Grafana.
+Provedor de identidade em `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, cert mkcert `authentik-tls`). O banco é o **PostgreSQL 18 compartilhado do namespace `data`** (ver [PostgreSQL (data)](#postgresql-data) abaixo) — banco `authentik`, dono a role `authentik` — por isso o `postgresql:` embutido do chart está `enabled: false` e a conexão vem inteira do Secret `authentik-config` (`AUTHENTIK_POSTGRESQL__*`, entregue ao server e ao worker por `envFrom`). Está aqui para ser o **login único** dos apps do cluster; ligados nele até agora: LiteLLM, Headlamp, Grafana e pgAdmin.
 
 Grupos, providers e applications são **declarativos**, via um blueprint que o chart monta no worker:
 
@@ -897,7 +898,7 @@ kubectl apply -f manifests/argocd/authentik/03-blueprint.yaml    # o ConfigMap d
 kubectl apply -f manifests/argocd/authentik/02-application.yaml  # depois deixa o Argo CD sincronizar o chart
 ```
 
-- `manifests/argocd/authentik/03-blueprint.yaml` é um ConfigMap com **três** blueprints, um por app: `litellm-oidc.yaml` (grupo `litellm-users`, provider OAuth2 `LiteLLM`, application e bindings), `headlamp-oidc.yaml` (idem, para o Headlamp — lá com o oauth2-proxy fazendo o fluxo) e `grafana-oidc.yaml` (idem, para o Grafana, que fala OIDC nativamente).
+- `manifests/argocd/authentik/03-blueprint.yaml` é um ConfigMap com **quatro** blueprints, um por app: `litellm-oidc.yaml` (grupo `litellm-users`, provider OAuth2 `LiteLLM`, application e bindings), `headlamp-oidc.yaml` (idem, para o Headlamp — lá com o oauth2-proxy fazendo o fluxo), `grafana-oidc.yaml` (idem, para o Grafana, que fala OIDC nativamente) e `pgadmin-oidc.yaml` (idem, para o pgAdmin, também OIDC nativo — ver a seção dele abaixo).
 - **Entrar e poder mexer são duas perguntas, com duas peças.** `litellm-users` + o binding da Application respondem *quem entra*; o *que pode fazer dentro* vem de um claim, não do grupo. Por isso o blueprint cria também o grupo `litellm-admins` (com binding próprio — sem ele um admin do LiteLLM seria admin de um app onde não consegue entrar) e um scope mapping `LiteLLM Role` (`scope_name: litellm_role`) que devolve `proxy_admin` para quem está nele e `internal_user_viewer` para o resto. O claim só chega no token se o scope estiver em `property_mappings` do provider **e** o client pedir no `scope=` do `/authorize` — o `/authorize` faz a **interseção** dos dois, então faltando um dos lados o claim não sai e não há erro nenhum (do lado do LiteLLM é a variável `GENERIC_SCOPE`; ver a seção dele abaixo).
 - É aplicado com **`kubectl`, nunca pelo Helm**: as tags do blueprint (`!Find`, `!KeyOf`, `!Env`) são YAML customizado, e o caminho `values → toYaml` do Helm as destrói (chegam no cluster como string solta e o blueprint falha).
 - O chart monta cada nome de `blueprints.configMaps` (no `02-application.yaml`) dentro do **worker**, em `/blueprints/mounted/cm-<nome>`; o worker descobre todo `*.yaml` de lá.
@@ -998,6 +999,15 @@ Cache de nó único no namespace `data`: um StatefulSet `redis:8-alpine` com per
 #### pgAdmin
 
 `dpage/pgadmin4:9.12.0`, login pelo Secret `pgadmin-credentials`, com um ConfigMap `servers.json` que já aponta para o PostgreSQL do cluster (`postgres:5432`), PVC `local-path` de 2Gi e UI em `https://pgadmin.lan`. Roda **não-root** (uid 5050) sem escalonamento: como o Python da imagem tem a file-capability `cap_net_bind_service`, mantém-se `drop [ALL] + add NET_BIND_SERVICE` na bounding set (senão o exec do Python falha com EPERM); o `PGADMIN_DISABLE_POSTFIX=1` elimina o único `sudo`, e ele escuta em 8080 (`PGADMIN_LISTEN_PORT`). Medido no pod: uid 5050 e CapEff=0.
+
+**SSO pelo Authentik** (provider `PgAdmin`, blueprint `pgadmin-oidc.yaml`). O pgAdmin fala OIDC **nativamente** com discovery (`OAUTH2_SERVER_METADATA_URL`), como o Grafana — não tem proxy na frente. Acesso restrito ao grupo **`pgadmin-users`**:
+
+- **Gate duplo**: o binding da Application no Authentik decide *quem entra*; do lado do pgAdmin, `OAUTH2_ADDITIONAL_CLAIMS = {'groups': ['pgadmin-users']}` recusa o login se o id_token não trouxer o grupo (por isso o provider tem `include_claims_in_id_token: true` — senão o claim só viria no userinfo).
+- O provider é lido **somente** da env `PGADMIN_CONFIG_OAUTH2_CONFIG` (a lista inteira, literal Python). Variáveis individuais (`PGADMIN_CONFIG_OAUTH2_CLIENT_ID` etc.) são **ignoradas** — o pgAdmin só loga um warning no boot. Armadilha documentada na doc oficial.
+- O par client_id/secret vem do Secret `pgadmin-oidc` (os mesmos valores `PGADMIN_OIDC_*` do `authentik.env`) e é injetado no manifesto via `$(PGADMIN_OIDC_CLIENT_ID)`/`$(PGADMIN_OIDC_CLIENT_SECRET)` — o segredo não aparece versionado.
+- **TLS**: o pod valida o id_token contra o JWKS do `authentik.lan`, então monta o `ca.crt` do secret `pgadmin-tls` (todo secret tls do cert-manager carrega a CA da emissora) em `/etc/pgadmin/mkcert-ca`, apontado por `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`. Sem isso a troca de token morre em erro x509 (a imagem não conhece o mkcert). Alternativa menos segura: `'OAUTH2_SSL_CERT_VERIFICATION': False` no provider.
+- O login local (`pgadmin-credentials`) continua como **emergência** (`AUTHENTICATION_SOURCES = ['oauth2', 'internal']`, como no Grafana/ArgoCD).
+- O redirect registrado no provider é `https://pgadmin.lan/oauth2/authorize`. Em OAuth2 não há senha do usuário, então para **salvar** a senha do Postgres o pgAdmin pede um *master password* no primeiro acesso (`MASTER_PASSWORD_REQUIRED`, default).
 
 ### Vaultwarden (`vault.lan`)
 

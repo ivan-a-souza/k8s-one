@@ -890,7 +890,7 @@ The `headlamp-admin-token` secret (type `kubernetes.io/service-account-token`) i
 
 ### Authentik (`authentik.lan`)
 
-Identity provider at `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, mkcert cert `authentik-tls`). Its database is the **shared PostgreSQL 18 of the `data` namespace** (see [PostgreSQL (data)](#postgresql-data) below) — database `authentik`, owned by the role `authentik` — so the chart's embedded `postgresql:` is `enabled: false` and the connection comes entirely from the `authentik-config` Secret (`AUTHENTIK_POSTGRESQL__*`, delivered to server and worker by `envFrom`). It is here to be the **single login** for the cluster's apps; wired to it so far: LiteLLM, Headlamp and Grafana (Argo CD planned).
+Identity provider at `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, mkcert cert `authentik-tls`). Its database is the **shared PostgreSQL 18 of the `data` namespace** (see [PostgreSQL (data)](#postgresql-data) below) — database `authentik`, owned by the role `authentik` — so the chart's embedded `postgresql:` is `enabled: false` and the connection comes entirely from the `authentik-config` Secret (`AUTHENTIK_POSTGRESQL__*`, delivered to server and worker by `envFrom`). It is here to be the **single login** for the cluster's apps; wired to it so far: LiteLLM, Headlamp, Grafana and pgAdmin (Argo CD planned).
 
 Groups, providers and applications are **declarative**, via a blueprint the chart mounts into the worker:
 
@@ -899,7 +899,7 @@ kubectl apply -f manifests/argocd/authentik/03-blueprint.yaml    # the blueprint
 kubectl apply -f manifests/argocd/authentik/02-application.yaml  # then let Argo CD sync the chart
 ```
 
-- `manifests/argocd/authentik/03-blueprint.yaml` is a ConfigMap holding **three** blueprints, one per app: `litellm-oidc.yaml` (group `litellm-users`, OAuth2 provider `LiteLLM`, application and bindings), `headlamp-oidc.yaml` (same, for Headlamp — with oauth2-proxy running the flow) and `grafana-oidc.yaml` (same, for Grafana, which speaks OIDC natively).
+- `manifests/argocd/authentik/03-blueprint.yaml` is a ConfigMap holding **four** blueprints, one per app: `litellm-oidc.yaml` (group `litellm-users`, OAuth2 provider `LiteLLM`, application and bindings), `headlamp-oidc.yaml` (same, for Headlamp — with oauth2-proxy running the flow), `grafana-oidc.yaml` (same, for Grafana, which speaks OIDC natively) and `pgadmin-oidc.yaml` (same, for pgAdmin, also OIDC-native — see its section below).
 - It is applied with **`kubectl`, never through Helm**: blueprint tags (`!Find`, `!KeyOf`, `!Env`) are custom YAML, and Helm's `values → toYaml` round-trip destroys them (they arrive in the cluster as bare strings and the blueprint fails).
 - The chart mounts every name in `blueprints.configMaps` (in `02-application.yaml`) into the **worker** at `/blueprints/mounted/cm-<name>`; the worker discovers all `*.yaml` there.
 - **Discovery is event-driven, not boot-time.** What triggers it is the file watcher (`on_created`/`on_modified`) plus an **hourly** scheduled run. A ConfigMap that is already populated when the worker starts fires nothing — the mount happens before the process is up. To force it without waiting: change the ConfigMap **data** (e.g. a comment in the blueprint) and the kubelet resyncs the volume, producing the events. `kubectl annotate` does **not** work: metadata does not make the kubelet resync.
@@ -997,6 +997,15 @@ Single-node cache in namespace `data`: a `redis:8-alpine` StatefulSet with AOF+R
 #### pgAdmin
 
 `dpage/pgadmin4:9.12.0`, login from the `pgadmin-credentials` Secret, with a `servers.json` ConfigMap that already points at the cluster's PostgreSQL (`postgres:5432`), a 2Gi `local-path` PVC and a UI at `https://pgadmin.lan`. It runs **non-root** (uid 5050) without privilege escalation: because the image's Python carries the file capability `cap_net_bind_service`, `drop [ALL] + add NET_BIND_SERVICE` is kept in the bounding set (otherwise the Python exec fails with EPERM); `PGADMIN_DISABLE_POSTFIX=1` removes the only `sudo`, and it listens on 8080 (`PGADMIN_LISTEN_PORT`). Measured in the pod: uid 5050 and CapEff=0.
+
+**SSO via Authentik** (provider `PgAdmin`, blueprint `pgadmin-oidc.yaml`). pgAdmin speaks OIDC **natively** with discovery (`OAUTH2_SERVER_METADATA_URL`), like Grafana — no proxy in front. Access is restricted to the **`pgadmin-users`** group:
+
+- **Double gate**: the Application binding in Authentik decides *who gets in*; on the pgAdmin side, `OAUTH2_ADDITIONAL_CLAIMS = {'groups': ['pgadmin-users']}` rejects the login if the id_token lacks the group (which is why the provider sets `include_claims_in_id_token: true` — otherwise the claim would only be in the userinfo).
+- The provider is read **only** from the `PGADMIN_CONFIG_OAUTH2_CONFIG` env (the whole list, a Python literal). Individual variables (`PGADMIN_CONFIG_OAUTH2_CLIENT_ID` etc.) are **ignored** — pgAdmin only logs a warning at boot. Documented gotcha.
+- The client_id/secret pair comes from the `pgadmin-oidc` Secret (the same `PGADMIN_OIDC_*` values as `authentik.env`) and is injected into the manifest via `$(PGADMIN_OIDC_CLIENT_ID)`/`$(PGADMIN_OIDC_CLIENT_SECRET)` — the secret is never committed.
+- **TLS**: the pod validates the id_token against the `authentik.lan` JWKS, so it mounts the `ca.crt` of the `pgadmin-tls` secret (every cert-manager tls secret carries the issuer CA) at `/etc/pgadmin/mkcert-ca`, pointed to by `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`. Without it the token exchange dies with an x509 error (the image does not know mkcert). Less secure alternative: `'OAUTH2_SSL_CERT_VERIFICATION': False` in the provider.
+- The local login (`pgadmin-credentials`) remains as an **emergency** fallback (`AUTHENTICATION_SOURCES = ['oauth2', 'internal']`, like Grafana/ArgoCD).
+- The redirect registered in the provider is `https://pgadmin.lan/oauth2/authorize`. With OAuth2 there is no user password, so to **save** the Postgres password pgAdmin asks for a *master password* on first use (`MASTER_PASSWORD_REQUIRED`, default).
 
 ### Vaultwarden (`vault.lan`)
 
