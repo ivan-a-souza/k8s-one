@@ -996,7 +996,7 @@ Single-node cache in namespace `data`: a `redis:8-alpine` StatefulSet with AOF+R
 
 #### pgAdmin
 
-`dpage/pgadmin4:9.12.0`, login from the `pgadmin-credentials` Secret, with a `servers.json` ConfigMap that already points at the cluster's PostgreSQL (`postgres:5432`), a 2Gi `local-path` PVC and a UI at `https://pgadmin.lan`. It runs **non-root** (uid 5050) without privilege escalation: because the image's Python carries the file capability `cap_net_bind_service`, `drop [ALL] + add NET_BIND_SERVICE` is kept in the bounding set (otherwise the Python exec fails with EPERM); `PGADMIN_DISABLE_POSTFIX=1` removes the only `sudo`, and it listens on 8080 (`PGADMIN_LISTEN_PORT`). Measured in the pod: uid 5050 and CapEff=0.
+`dpage/pgadmin4:9.18.0`, login from the `pgadmin-credentials` Secret, with a `servers.json` ConfigMap that already points at the cluster's PostgreSQL (`postgres:5432`), a 2Gi `local-path` PVC and a UI at `https://pgadmin.lan`. It runs **non-root** (uid 5050) without privilege escalation: because the image's Python carries the file capability `cap_net_bind_service`, `drop [ALL] + add NET_BIND_SERVICE` is kept in the bounding set (otherwise the Python exec fails with EPERM); `PGADMIN_DISABLE_POSTFIX=1` removes the only `sudo`, and it listens on 8080 (`PGADMIN_LISTEN_PORT`). Measured in the pod: uid 5050 and CapEff=0.
 
 **SSO via Authentik** (provider `PgAdmin`, blueprint `pgadmin-oidc.yaml`). pgAdmin speaks OIDC **natively** with discovery (`OAUTH2_SERVER_METADATA_URL`), like Grafana — no proxy in front. Access is restricted to the **`pgadmin-users`** group:
 
