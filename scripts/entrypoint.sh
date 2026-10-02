@@ -858,6 +858,17 @@ apply_manifests() {
   $kc -n argocd patch deployment argocd-server --type=json \
     -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":["/usr/local/bin/argocd-server","--insecure"]}]' \
     2>&1 | tail -1 || log "WARN: could not patch argocd-server --insecure"
+  # SSO via Authentik (OIDC direto) + RBAC por grupo. O install.yaml recria o
+  # argocd-cm/argocd-rbac-cm a cada boot, entao a config e reaplicada aqui como
+  # merge patch (idempotente). O client secret fica no Secret `argocd-oidc`
+  # (criado por scripts/create-secrets.sh); o rootCA do mkcert vai inline no
+  # oidc-patch. Ver os comentarios em manifests/built-in/argocd/.
+  $kc -n argocd patch cm argocd-cm --type merge \
+    --patch-file "$MANIFESTS/built-in/argocd/oidc-patch.yaml" 2>&1 | tail -1 \
+    || log "WARN: could not patch argocd-cm (OIDC)"
+  $kc -n argocd patch cm argocd-rbac-cm --type merge \
+    --patch-file "$MANIFESTS/built-in/argocd/rbac-patch.yaml" 2>&1 | tail -1 \
+    || log "WARN: could not patch argocd-rbac-cm (RBAC)"
   log "Argo CD $ARGOCD_VERSION applied."
 
   # Final stale-state pass: pods only get marked Unknown once the kubelet

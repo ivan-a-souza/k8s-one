@@ -350,6 +350,8 @@ they never contain a password.
 | `odoo-db` | `odoo` + `data` | `manifests/argocd/odoo/secrets/odoo-db.yaml` | Odoo's PostgreSQL role (`odoo`) |
 | `redis-auth` | `data` | `manifests/argocd/redis/secrets/redis-auth.yaml` | Redis `requirepass` |
 | `pgadmin-credentials` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-credentials.yaml` | pgAdmin initial login |
+| `pgadmin-oidc` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-oidc.env` | pgAdmin OIDC client (`PGADMIN_OIDC_*`), read via `secretKeyRef` |
+| `argocd-oidc` | `argocd` | `manifests/ops/argocd/secrets/argocd-oidc.env` | Argo CD OIDC client (`ARGOCD_OIDC_*`); referenced by `$argocd-oidc:ARGOCD_OIDC_CLIENT_SECRET` |
 | `vaultwarden-env` | `vaultwarden` | `manifests/argocd/vaultwarden/secrets/vaultwarden.env` | Vaultwarden env (`ADMIN_TOKEN`, `DOMAIN`, …) |
 
 Formats:
@@ -862,6 +864,14 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 Ingress/cert manifests: `manifests/ops/argocd/` (versioned in this repo).
 
+**SSO via Authentik** (provider `Argo CD`, blueprint `argocd-oidc.yaml`). Argo CD speaks OIDC **natively** (`oidc.config` in `argocd-cm`) — no Dex, no proxy:
+
+- Access via the **`argocd-admins`** group (Application binding) → `role:admin`, through `argocd-rbac-cm` (`g, argocd-admins, role:admin`, `scopes: '[groups]'`).
+- **Config applied by the entrypoint:** Argo CD is installed from the upstream `install.yaml` on every boot, which recreates `argocd-cm`, so `scripts/entrypoint.sh` re-applies two merge patches — `manifests/built-in/argocd/oidc-patch.yaml` (`url`, `issuer`, `clientID`, mkcert `rootCA` and `requestedIDTokenClaims: groups`) and `rbac-patch.yaml`. It is **not** managed by an Argo Application.
+- The `clientSecret` is **not in the patch**: it references the `argocd-oidc` Secret via `$argocd-oidc:ARGOCD_OIDC_CLIENT_SECRET` — hence the Secret carries the label `app.kubernetes.io/part-of: argocd` (otherwise the reference is ignored). The `ARGOCD_OIDC_*` values are the same as in `authentik.env` (one credential, two secrets).
+- RBAC reads the **`groups`** claim from the id_token (the Authentik provider uses `include_claims_in_id_token: true`). Registered redirect: `https://argocd.lan/auth/callback`. Logout ends the Authentik session (`logoutURL` → end-session).
+- The local `admin` login (`argocd-initial-admin-secret`) remains as an **emergency** fallback.
+
 ### Headlamp (`headlamp.lan`)
 
 Dashboard at `https://headlamp.lan` (ingress routes by Host; mkcert cert `headlamp.lan`). Login is **SSO through Authentik**, via an **oauth2-proxy** in front of Headlamp.
@@ -890,7 +900,7 @@ The `headlamp-admin-token` secret (type `kubernetes.io/service-account-token`) i
 
 ### Authentik (`authentik.lan`)
 
-Identity provider at `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, mkcert cert `authentik-tls`). Its database is the **shared PostgreSQL 18 of the `data` namespace** (see [PostgreSQL (data)](#postgresql-data) below) — database `authentik`, owned by the role `authentik` — so the chart's embedded `postgresql:` is `enabled: false` and the connection comes entirely from the `authentik-config` Secret (`AUTHENTIK_POSTGRESQL__*`, delivered to server and worker by `envFrom`). It is here to be the **single login** for the cluster's apps; wired to it so far: LiteLLM, Headlamp, Grafana and pgAdmin (Argo CD planned).
+Identity provider at `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, mkcert cert `authentik-tls`). Its database is the **shared PostgreSQL 18 of the `data` namespace** (see [PostgreSQL (data)](#postgresql-data) below) — database `authentik`, owned by the role `authentik` — so the chart's embedded `postgresql:` is `enabled: false` and the connection comes entirely from the `authentik-config` Secret (`AUTHENTIK_POSTGRESQL__*`, delivered to server and worker by `envFrom`). It is here to be the **single login** for the cluster's apps; wired to it so far: LiteLLM, Headlamp, Grafana, pgAdmin and Argo CD.
 
 Groups, providers and applications are **declarative**, via a blueprint the chart mounts into the worker:
 
@@ -899,7 +909,7 @@ kubectl apply -f manifests/argocd/authentik/03-blueprint.yaml    # the blueprint
 kubectl apply -f manifests/argocd/authentik/02-application.yaml  # then let Argo CD sync the chart
 ```
 
-- `manifests/argocd/authentik/03-blueprint.yaml` is a ConfigMap holding **four** blueprints, one per app: `litellm-oidc.yaml` (group `litellm-users`, OAuth2 provider `LiteLLM`, application and bindings), `headlamp-oidc.yaml` (same, for Headlamp — with oauth2-proxy running the flow), `grafana-oidc.yaml` (same, for Grafana, which speaks OIDC natively) and `pgadmin-oidc.yaml` (same, for pgAdmin, also OIDC-native — see its section below).
+- `manifests/argocd/authentik/03-blueprint.yaml` is a ConfigMap holding **five** blueprints, one per app: `litellm-oidc.yaml` (group `litellm-users`, OAuth2 provider `LiteLLM`, application and bindings), `headlamp-oidc.yaml` (same, for Headlamp — with oauth2-proxy running the flow), `grafana-oidc.yaml` (same, for Grafana, which speaks OIDC natively), `pgadmin-oidc.yaml` (same, for pgAdmin, also OIDC-native) and `argocd-oidc.yaml` (same, for Argo CD — group `argocd-admins` → `role:admin`).
 - It is applied with **`kubectl`, never through Helm**: blueprint tags (`!Find`, `!KeyOf`, `!Env`) are custom YAML, and Helm's `values → toYaml` round-trip destroys them (they arrive in the cluster as bare strings and the blueprint fails).
 - The chart mounts every name in `blueprints.configMaps` (in `02-application.yaml`) into the **worker** at `/blueprints/mounted/cm-<name>`; the worker discovers all `*.yaml` there.
 - **Discovery is event-driven, not boot-time.** What triggers it is the file watcher (`on_created`/`on_modified`) plus an **hourly** scheduled run. A ConfigMap that is already populated when the worker starts fires nothing — the mount happens before the process is up. To force it without waiting: change the ConfigMap **data** (e.g. a comment in the blueprint) and the kubelet resyncs the volume, producing the events. `kubectl annotate` does **not** work: metadata does not make the kubelet resync.

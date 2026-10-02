@@ -351,6 +351,7 @@ os Secrets via `existingSecret` — nunca contêm senha.
 | `redis-auth` | `data` | `manifests/argocd/redis/secrets/redis-auth.yaml` | `requirepass` do Redis |
 | `pgadmin-credentials` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-credentials.yaml` | login inicial (interno) do pgAdmin |
 | `pgadmin-oidc` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-oidc.env` | client OIDC do pgAdmin (`PGADMIN_OIDC_*`), lido via `secretKeyRef` |
+| `argocd-oidc` | `argocd` | `manifests/ops/argocd/secrets/argocd-oidc.env` | client OIDC do Argo CD (`ARGOCD_OIDC_*`); referenciado por `$argocd-oidc:ARGOCD_OIDC_CLIENT_SECRET` |
 | `vaultwarden-env` | `vaultwarden` | `manifests/argocd/vaultwarden/secrets/vaultwarden.env` | env do Vaultwarden (`ADMIN_TOKEN`, `DOMAIN`, …) |
 
 Formatos:
@@ -861,6 +862,14 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 
 Manifestos do ingress/certificado: `manifests/ops/argocd/` (versionado neste repo).
 
+**SSO pelo Authentik** (provider `Argo CD`, blueprint `argocd-oidc.yaml`). O Argo CD fala OIDC **nativamente** (`oidc.config` no `argocd-cm`) — não usa o Dex nem proxy:
+
+- Acesso pelo grupo **`argocd-admins`** (binding da Application) → `role:admin`, via `argocd-rbac-cm` (`g, argocd-admins, role:admin`, `scopes: '[groups]'`).
+- **Config aplicada pelo entrypoint:** o Argo CD é instalado do `install.yaml` upstream a cada boot, que recria o `argocd-cm`, então `scripts/entrypoint.sh` reaplica dois merge patches — `manifests/built-in/argocd/oidc-patch.yaml` (`url`, `issuer`, `clientID`, `rootCA` do mkcert e `requestedIDTokenClaims: groups`) e `rbac-patch.yaml`. **Não** é gerido por uma Application do próprio Argo.
+- O `clientSecret` **não fica no patch**: referencia o Secret `argocd-oidc` via `$argocd-oidc:ARGOCD_OIDC_CLIENT_SECRET` — por isso o Secret leva o label `app.kubernetes.io/part-of: argocd` (senão a referência é ignorada). Os valores `ARGOCD_OIDC_*` são os mesmos do `authentik.env` (uma credencial, dois secrets).
+- O RBAC lê o claim **`groups`** do id_token (o provider do Authentik usa `include_claims_in_id_token: true`). Redirect registrado: `https://argocd.lan/auth/callback`. O logout encerra a sessão no Authentik (`logoutURL` → end-session).
+- O login local `admin` (senha do `argocd-initial-admin-secret`) continua como **emergência**.
+
 ### Headlamp (`headlamp.lan`)
 
 Dashboard em `https://headlamp.lan` (ingress roteia pelo Host; cert mkcert `headlamp.lan`). O login é **SSO pelo Authentik**, feito por um **oauth2-proxy** na frente do Headlamp.
@@ -889,7 +898,7 @@ O secret `headlamp-admin-token` (tipo `kubernetes.io/service-account-token`) é 
 
 ### Authentik (`authentik.lan`)
 
-Provedor de identidade em `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, cert mkcert `authentik-tls`). O banco é o **PostgreSQL 18 compartilhado do namespace `data`** (ver [PostgreSQL (data)](#postgresql-data) abaixo) — banco `authentik`, dono a role `authentik` — por isso o `postgresql:` embutido do chart está `enabled: false` e a conexão vem inteira do Secret `authentik-config` (`AUTHENTIK_POSTGRESQL__*`, entregue ao server e ao worker por `envFrom`). Está aqui para ser o **login único** dos apps do cluster; ligados nele até agora: LiteLLM, Headlamp, Grafana e pgAdmin.
+Provedor de identidade em `https://authentik.lan` (chart `authentik` 2026.8.1, ns `platform`, cert mkcert `authentik-tls`). O banco é o **PostgreSQL 18 compartilhado do namespace `data`** (ver [PostgreSQL (data)](#postgresql-data) abaixo) — banco `authentik`, dono a role `authentik` — por isso o `postgresql:` embutido do chart está `enabled: false` e a conexão vem inteira do Secret `authentik-config` (`AUTHENTIK_POSTGRESQL__*`, entregue ao server e ao worker por `envFrom`). Está aqui para ser o **login único** dos apps do cluster; ligados nele até agora: LiteLLM, Headlamp, Grafana, pgAdmin e Argo CD.
 
 Grupos, providers e applications são **declarativos**, via um blueprint que o chart monta no worker:
 
@@ -898,7 +907,7 @@ kubectl apply -f manifests/argocd/authentik/03-blueprint.yaml    # o ConfigMap d
 kubectl apply -f manifests/argocd/authentik/02-application.yaml  # depois deixa o Argo CD sincronizar o chart
 ```
 
-- `manifests/argocd/authentik/03-blueprint.yaml` é um ConfigMap com **quatro** blueprints, um por app: `litellm-oidc.yaml` (grupo `litellm-users`, provider OAuth2 `LiteLLM`, application e bindings), `headlamp-oidc.yaml` (idem, para o Headlamp — lá com o oauth2-proxy fazendo o fluxo), `grafana-oidc.yaml` (idem, para o Grafana, que fala OIDC nativamente) e `pgadmin-oidc.yaml` (idem, para o pgAdmin, também OIDC nativo — ver a seção dele abaixo).
+- `manifests/argocd/authentik/03-blueprint.yaml` é um ConfigMap com **cinco** blueprints, um por app: `litellm-oidc.yaml` (grupo `litellm-users`, provider OAuth2 `LiteLLM`, application e bindings), `headlamp-oidc.yaml` (idem, para o Headlamp — lá com o oauth2-proxy fazendo o fluxo), `grafana-oidc.yaml` (idem, para o Grafana, que fala OIDC nativamente), `pgadmin-oidc.yaml` (idem, para o pgAdmin, também OIDC nativo) e `argocd-oidc.yaml` (idem, para o Argo CD — grupo `argocd-admins` → `role:admin`).
 - **Entrar e poder mexer são duas perguntas, com duas peças.** `litellm-users` + o binding da Application respondem *quem entra*; o *que pode fazer dentro* vem de um claim, não do grupo. Por isso o blueprint cria também o grupo `litellm-admins` (com binding próprio — sem ele um admin do LiteLLM seria admin de um app onde não consegue entrar) e um scope mapping `LiteLLM Role` (`scope_name: litellm_role`) que devolve `proxy_admin` para quem está nele e `internal_user_viewer` para o resto. O claim só chega no token se o scope estiver em `property_mappings` do provider **e** o client pedir no `scope=` do `/authorize` — o `/authorize` faz a **interseção** dos dois, então faltando um dos lados o claim não sai e não há erro nenhum (do lado do LiteLLM é a variável `GENERIC_SCOPE`; ver a seção dele abaixo).
 - É aplicado com **`kubectl`, nunca pelo Helm**: as tags do blueprint (`!Find`, `!KeyOf`, `!Env`) são YAML customizado, e o caminho `values → toYaml` do Helm as destrói (chegam no cluster como string solta e o blueprint falha).
 - O chart monta cada nome de `blueprints.configMaps` (no `02-application.yaml`) dentro do **worker**, em `/blueprints/mounted/cm-<nome>`; o worker descobre todo `*.yaml` de lá.

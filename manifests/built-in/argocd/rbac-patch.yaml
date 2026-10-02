@@ -1,0 +1,11 @@
+# Merge patch do argocd-rbac-cm: RBAC por grupo do Authentik. Aplicado pelo
+# entrypoint a cada boot (o install.yaml upstream recria o ConfigMap).
+#
+# `scopes: '[groups]'` faz o Argo CD decidir o papel pelo claim `groups` do id_token
+# (que o provider do Authentik inclui via include_claims_in_id_token). A unica
+# regra da: quem esta em `argocd-admins` vira admin. Quem nao esta no grupo nem
+# autentica (o binding da Application no Authentik barra).
+data:
+  policy.csv: |
+    g, argocd-admins, role:admin
+  scopes: '[groups]'

@@ -102,6 +102,12 @@ apply_yaml_secret manifests/argocd/pgadmin/secrets/pgadmin-credentials.yaml
 # authentik.env como PGADMIN_OIDC_* — o blueprint registra o client, o pgAdmin
 # o apresenta (uma credencial, dois secrets).
 apply_env_secret data pgadmin-oidc manifests/argocd/pgadmin/secrets/pgadmin-oidc.env
+# argocd — client OIDC do SSO (chaves ARGOCD_OIDC_CLIENT_ID / _SECRET). Os
+# MESMOS valores estão em authentik.env como ARGOCD_OIDC_*. O Argo CD lê o
+# secret pela referência `$argocd-oidc:ARGOCD_OIDC_CLIENT_SECRET` no oidc.config,
+# que exige o label `app.kubernetes.io/part-of: argocd` (senão a referência é ignorada).
+apply_env_secret argocd argocd-oidc manifests/ops/argocd/secrets/argocd-oidc.env
+"${KC[@]}" -n argocd label secret argocd-oidc app.kubernetes.io/part-of=argocd --overwrite
 
 echo "OK: secrets aplicados."
 apply_env_secret vaultwarden vaultwarden-env manifests/argocd/vaultwarden/secrets/vaultwarden.env

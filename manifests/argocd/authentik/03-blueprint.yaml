@@ -492,3 +492,86 @@ data:
           group: !KeyOf pgadmin-group
           order: 0
           enabled: true
+
+  # Provider OIDC do Argo CD (ns argocd). O Argo CD fala OIDC NATIVAMENTE via
+  # `oidc.config` no argocd-cm (issuer em /application/o/argocd/); o Authentik
+  # so entrega os claims. O LOGIN e o RBAC usam o claim `groups` do id_token:
+  # `g, argocd-admins, role:admin` no argocd-rbac-cm (ver os patches em
+  # manifests/built-in/argocd/, aplicados pelo entrypoint a cada boot).
+  argocd-oidc.yaml: |
+    version: 1
+    metadata:
+      name: argocd-oidc
+      labels:
+        blueprints.goauthentik.io/description: Provider OIDC do Argo CD (k8s-one)
+    entries:
+      # Grupo que controla quem entra E que vira admin (role:admin no Argo CD).
+      - model: authentik_core.group
+        id: argocd-admins-group
+        identifiers:
+          name: argocd-admins
+        attrs:
+          name: argocd-admins
+          users:
+            - !Find [authentik_core.user, [username, akadmin]]
+
+      - model: authentik_providers_oauth2.oauth2provider
+        id: argocd-provider
+        identifiers:
+          name: Argo CD
+        attrs:
+          name: Argo CD
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+          client_type: confidential
+          # ArrayField com default vazio: sem declarar, o provider recusa todo
+          # grant (ver a nota no provider do litellm). O `refresh_token` e o que
+          # o Argo CD usa no fluxo OIDC quando o id_token expira.
+          grant_types:
+            - authorization_code
+            - refresh_token
+          client_id: !Env ARGOCD_OIDC_CLIENT_ID
+          client_secret: !Env ARGOCD_OIDC_CLIENT_SECRET
+          signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+          # O `sub` hasheado e o username no Argo CD; o RBAC vem do claim
+          # `groups` (nao do username), entao isso e so privacidade.
+          sub_mode: hashed_user_id
+          # id_token carrega os mesmos claims do userinfo — o `groups` sai no
+          # proprio token, que e o que o Argo CD avalia no RBAC (scopes: [groups]).
+          include_claims_in_id_token: true
+          redirect_uris:
+            # Caminho nativo do OIDC do Argo CD (nao e /api/dex/callback, que e
+            # do Dex — aqui usamos o provedor OIDC direto).
+            - matching_mode: strict
+              url: https://argocd.lan/auth/callback
+          property_mappings:
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-openid"]]
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-email"]]
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-profile"]]
+
+      - model: authentik_core.application
+        id: argocd-app
+        identifiers:
+          slug: argocd
+        attrs:
+          name: Argo CD
+          slug: argocd
+          provider: !KeyOf argocd-provider
+          # O slug define o issuer/discovery em /application/o/argocd/ — a URL
+          # que o `oidc.config.issuer` do argocd-cm consulta.
+          meta_launch_url: https://argocd.lan
+          meta_description: GitOps e deploy do cluster
+          meta_publisher: k8s-one
+          policy_engine_mode: any
+
+      # Binding de entrada: sem ele o provider existe mas ninguem autoriza.
+      - model: authentik_policies.policybinding
+        id: argocd-app-binding
+        identifiers:
+          target: !KeyOf argocd-app
+          group: !KeyOf argocd-admins-group
+        attrs:
+          target: !KeyOf argocd-app
+          group: !KeyOf argocd-admins-group
+          order: 0
+          enabled: true

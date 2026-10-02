@@ -1,0 +1,47 @@
+# Merge patch do argocd-cm: OIDC/SSO pelo Authentik. Aplicado pelo entrypoint
+# a cada boot (o Argo CD e instalado a partir do install.yaml upstream, que
+# recria o argocd-cm). Ver scripts/entrypoint.sh.
+#
+# `clientSecret` referencia o Secret argocd-oidc (ns argocd, label
+# app.kubernetes.io/part-of: argocd) — o segredo NUNCA fica neste arquivo.
+# `rootCA` e o certificado PUBLICO da raiz do mkcert (sem chave privada), para
+# o Argo CD confiar no TLS do authentik.lan sem montar CA no pod.
+data:
+  url: https://argocd.lan
+  oidc.config: |
+    name: Authentik
+    issuer: https://authentik.lan/application/o/argocd/
+    clientID: argocd
+    clientSecret: $argocd-oidc:ARGOCD_OIDC_CLIENT_SECRET
+    requestedScopes: ["openid", "profile", "email", "groups"]
+    requestedIDTokenClaims: {"groups": {"essential": true}}
+    logoutURL: https://authentik.lan/application/o/argocd/end-session/?id_token_hint={{token}}
+    rootCA: |
+      -----BEGIN CERTIFICATE-----
+      MIIEsTCCAxmgAwIBAgIQA4d8b6WbMgb4HjkqrIuzMTANBgkqhkiG9w0BAQsFADBx
+      MR4wHAYDVQQKExVta2NlcnQgZGV2ZWxvcG1lbnQgQ0ExIzAhBgNVBAsMGml2YW5A
+      ZGViaWFuIChJdmFuIEF1Z3VzdG8pMSowKAYDVQQDDCFta2NlcnQgaXZhbkBkZWJp
+      YW4gKEl2YW4gQXVndXN0bykwHhcNMjYwNTI3MTgxNDQyWhcNMzYwNTI3MTgxNDQy
+      WjBxMR4wHAYDVQQKExVta2NlcnQgZGV2ZWxvcG1lbnQgQ0ExIzAhBgNVBAsMGml2
+      YW5AZGViaWFuIChJdmFuIEF1Z3VzdG8pMSowKAYDVQQDDCFta2NlcnQgaXZhbkBk
+      ZWJpYW4gKEl2YW4gQXVndXN0bykwggGiMA0GCSqGSIb3DQEBAQUAA4IBjwAwggGK
+      AoIBgQDCunlQR5+azbE+XoC4AzV2vRPQ2AzwEn0ZJKApnaDw5bFecJy2cdOPF9eA
+      xchilH4jFd9W7PXGNasr2NoW2FMoNWp6ApZTJuyaEO5x3KCs5J/deh/JqX/Z6Qoz
+      qoSgkIUdhmG/66QaZiaykbQBiVVeiVJzz4mLTOUcVnaCsGOCjksnwOSBx3CuAHQ+
+      uzLFb3ZOd9GJkZogNcwyph/bevyS6VmHSg9PSWlpAyEERx5lkls87SAXRKWrCmWT
+      YwciwTWrYAnwqGeAgUNtIx1NhN0WEsMjYYd1ZuIoxSM3gJwP+6diCe74DDG7L5+U
+      Hl3U4nq+cMYTHW5Do1+SJaVpo1vBmy1SsKuf4tMfdpPDZfI9WVC6jrJmY/hYC8A+
+      xrNr3FtdlNANaYGc8GfSfPSfpUzRJ2GbONzEWvxvNQTJfN8W4BKqgpKkkvfFV/Cn
+      mtD1cxbh6r3L/gVwzRUSbOIpPbhlCyCHeJwbKhN/1mXX0oa3aGxyYj6J4YPx7Z91
+      PEVOv/sCAwEAAaNFMEMwDgYDVR0PAQH/BAQDAgIEMBIGA1UdEwEB/wQIMAYBAf8C
+      AQAwHQYDVR0OBBYEFO865kbgQV0mGqLcYn+cNkgu6be+MA0GCSqGSIb3DQEBCwUA
+      A4IBgQBJ4vCTr3L07Ybw2zG2wVElGFiw/wu0NHROy690cWxiiEZ+0tKx4G92M1oH
+      +zfSjJQb6zMg4A4j8xYDsun8iEAzhlq/CkOAI1gz1xDJPEt7Jb/D+SQCpxE6t0iu
+      d0yMkATIF6dZWHLorQXQxQyyuSEc3C6U92VetVpBHuvOmWxdndj5mhtlm1MXolEV
+      r4P39SAZUzkFF6p9jamPo2rge5XM72/neUzkDrxhEosjGEuiktZdPkztjsw5h/hD
+      iOcTYaU1XQrP50mgkooAoy1xIW44zhJnPkt7C2TzH0bUKgnvfaaGz/c5yD4kxU13
+      bNo2xGhXACL+yVt+u/qoR9kvxOD0TP8VDwplky/qPrwuBqqFlm3uqmZu+5JlL7VR
+      IedaM2paaypw+8z4N03w/e7+8aIeqEJu5IuP5Snhs9gULEJjo6yLcsIVqkq/4tiu
+      I33DNqpp5363jkaqVSCslyIHhQ56SHgvUdWKSnYsdC5wMCdvBdaXDzHLjR85oRIR
+      AmIUji8=
+      -----END CERTIFICATE-----
