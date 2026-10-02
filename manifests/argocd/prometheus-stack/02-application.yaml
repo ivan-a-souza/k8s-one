@@ -91,6 +91,15 @@ spec:
               # request (http, atrás do ingress) e o authentik recusa por não
               # bater com o registrado no provider.
               root_url: https://grafana.lan/
+            # O Grafana 13 "preinstala" os plugins bundled movendo-os de
+            # /usr/share/grafana/data/plugins-bundled para GF_PATHS_PLUGINS e
+            # apagando a origem (`unlinkat`). Com rootfs read-only o unlink
+            # falha -> o plugin (prometheus, loki, ...) some do catalogo e os
+            # dashboards ficam sem dados ("Unable to find datasource plugin").
+            # Desligar o preinstall faz o Grafana carregar os bundled direto do
+            # caminho da imagem, que ja esta no scan de plugins.
+            plugins:
+              preinstall_disabled: true
             auth.generic_oauth:
               enabled: true
               name: Authentik
