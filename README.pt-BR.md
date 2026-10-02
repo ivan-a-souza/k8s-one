@@ -38,6 +38,7 @@ Empacotado numa **imagem mínima baseada em Debian** via multi-stage build (sem 
 - [Configuração](#configuração)
 - [Segredos](#segredos)
 - [Acesso ao Cluster](#acesso-ao-cluster)
+- [kt-connect (ktctl)](#kt-connect-ktctl)
 - [Exemplos de Uso](#exemplos-de-uso)
 - [Estrutura do Projeto](#estrutura-do-projeto)
 - [Sequência de Inicialização](#sequência-de-inicialização)
@@ -431,6 +432,94 @@ docker exec k8s-one kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -A
 
 ---
 
+## kt-connect (ktctl)
+
+O [kt-connect](https://github.com/alibaba/kt-connect) liga a máquina local à
+rede do cluster sem expor nada na LAN: o `ktctl` cria um *shadow pod*
+temporário (`kt-connect-shadow`) no namespace alvo e monta o túnel por
+**port-forward da API**. Serve para acessar ClusterIPs/Pod IPs a partir do host,
+redirecionar o tráfego de um Service para um processo local (`exchange`/`mesh`) e
+expor um serviço local no cluster (`preview`/`forward`).
+
+Nada é instalado permanentemente no cluster: o RBAC dedicado vive em
+`manifests/ops/kt-connect/` (namespace `kt-connect`, ServiceAccount + ClusterRole
+escopados ao que o ktctl usa — **não é cluster-admin**) e é aplicado junto do
+domínio `ops`:
+
+```bash
+scripts/deploy-apps.sh ops
+```
+
+### Cliente (neste host)
+
+```bash
+curl -OL https://github.com/alibaba/kt-connect/releases/download/v0.3.7/ktctl_0.3.7_Linux_x86_64.tar.gz
+tar zxf ktctl_0.3.7_Linux_x86_64.tar.gz
+sudo mv ktctl /usr/local/bin/ && ktctl --version
+```
+
+### kubeconfig da ServiceAccount
+
+O ktctl não usa o `admin.conf`: usa um kubeconfig da SA `kt-connect`. Gere com:
+
+```bash
+scripts/kt-connect-kubeconfig.sh
+export KUBECONFIG=$PWD/kubeconfig.kt-connect
+```
+
+O script aplica o RBAC, espera o controller popular o token do Secret
+`kt-connect-token` (token de longa duração — o k8s 1.24+ não cria mais o Secret
+sozinho) e escreve `kubeconfig.kt-connect` com server/CA do cluster + token da
+SA. É gitignored.
+
+### Uso
+
+O wrapper `scripts/kt.sh` fixa o kubeconfig, a imagem do shadow e o DNS em modo
+`hosts` (escreve só no `/etc/hosts`, sem tocar no `/etc/resolv.conf` do host).
+Para `connect`, o shadow nasce no namespace `kt-connect`:
+
+```bash
+sudo scripts/kt.sh connect                     # root; acessa ClusterIP/Pod IP do host
+scripts/kt.sh preview minha-api --expose 8080 -n apps
+scripts/kt.sh forward minha-api 6060:8080 -n apps
+scripts/kt.sh exchange minha-api --expose 8080 -n apps
+scripts/kt.sh mesh minha-api --expose 8080 -n apps
+scripts/kt.sh clean
+```
+
+> `connect` exige root (`/dev/net/tun` + alteração de rotas); `preview`,
+> `forward`, `exchange` e `mesh` não.
+>
+> O ktctl **não segue o namespace do contexto do kubeconfig**: o flag
+> `--namespace` tem default `default` e é ele que decide onde o shadow/Service
+> nasce. Para `exchange`/`mesh` é o namespace do serviço alvo; para `preview` é
+> onde o serviço local é publicado. O wrapper só fixa `-n kt-connect` no
+> `connect`; os demais aceitam `-n <ns>`.
+
+### Notas
+
+- **Imagem**: o default é
+  `registry.cn-hangzhou.aliyuncs.com/rdc-incubator/kt-connect-shadow:v0.3.7`
+  (não existe no ghcr/Docker Hub). Sobrescreva com `KT_SHADOW_IMAGE=...`.
+- **Rotas**: o `connect` deriva o CIDR dos IPs reais. Alguns pods usam
+  `hostNetwork` (cilium, cilium-envoy, cilium-operator, adguard) e reportam o IP
+  do nó (`192.168.32.2`) como podIP — com isso o range de pods computado vira
+  `192.168.0.0/16` e engoliria a rede docker. O wrapper já passa
+  `--excludeIps 192.168.32.0/20` (ajustável em `KT_EXCLUDE_IPS`), e o IP da API é
+  excluído automaticamente. A LAN (`192.168.1.0/24`) tem rota mais específica e
+  não é afetada. Se a rede local usar `192.168.0.x`, ajuste `KT_EXCLUDE_IPS`.
+- **Nomes vs IPs**: o roteamento cobre todo o cluster por IP/ClusterIP. A
+  resolução de nomes via `/etc/hosts` (`--dnsMode hosts`) é limitada ao
+  `--namespace`; para resolver outros namespaces, passe
+  `--dnsMode hosts:default,apps,data,platform,ops,argocd,monitoring,networking`.
+- **Compatibilidade**: kt-connect v0.3.7 é de 2022; no k8s 1.36 `connect`,
+  `forward` e `preview` funcionam, mas `exchange`/`mesh` devem ser validados na
+  prática.
+- O shadow pod e o ConfigMap são removidos ao encerrar o comando (`Ctrl-C`);
+  `ktctl clean` limpa resíduos de execuções interrompidas.
+
+---
+
 ## Exemplos de Uso
 
 ### Deploy de um Pod simples
@@ -575,7 +664,9 @@ k8s-one/
 ├── scripts/
 │   ├── entrypoint.sh                   # Orquestração: PKI, configs, processos, manifests
 │   ├── deploy-apps.sh                  # Aplica kustomize sob demanda (manifests/<domínio>)
-│   └── create-secrets.sh               # Cria/atualiza Secrets a partir de manifests/**/secrets/
+│   ├── create-secrets.sh               # Cria/atualiza Secrets a partir de manifests/**/secrets/
+│   ├── kt-connect-kubeconfig.sh        # Gera o kubeconfig da SA usada pelo ktctl
+│   └── kt.sh                           # Wrapper do ktctl (kt-connect)
 │
 ├── configs/
 │   └── containerd-config.toml          # containerd: runc + cgroupfs + overlayfs
@@ -603,8 +694,9 @@ k8s-one/
     │   └── adguard/                    # AdGuard Home (DNS da LAN/tailnet)
     ├── ops/
     │   ├── argocd/                     # Ingress + Certificate do argocd.lan (versionado)
-    │   └── headlamp/                   # Dashboard, oauth2-proxy, ingress/cert
-    │       └── plugin-logout/          # Plugin "Sair" próprio (ConfigMap)
+    │   ├── headlamp/                   # Dashboard, oauth2-proxy, ingress/cert
+    │   │   └── plugin-logout/          # Plugin "Sair" próprio (ConfigMap)
+    │   └── kt-connect/                 # RBAC do ktctl (SA + ClusterRole + token)
     ├── odoo/                           # Odoo (manifestos próprios — fonte da Application)
     ├── opensearch/                     # OpenSearch + Dashboards (manifestos próprios)
     ├── pgadmin/                        # pgAdmin 4 (manifestos próprios)

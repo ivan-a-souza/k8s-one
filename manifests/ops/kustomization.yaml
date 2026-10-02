@@ -1,7 +1,9 @@
-# Domínio ops — consoles & GitOps do cluster (headlamp, argocd).
+# Domínio ops — consoles, GitOps e ferramentas de dev do cluster
+# (headlamp, argocd, kt-connect).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - headlamp
   - argocd
+  - kt-connect

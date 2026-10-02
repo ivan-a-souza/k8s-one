@@ -1,5 +1,6 @@
 # Kubeconfig
 kubeconfig
+kubeconfig.kt-connect
 *.conf
 
 # Bind mounts de estado do cluster (etcd, containerd, kubelet, PKI, kubeconfigs, Ceph) — NUNCA commitar

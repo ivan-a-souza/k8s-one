@@ -1,0 +1,96 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kt-connect
+  labels:
+    app: kt-connect
+    managed-by: clawdete
+# Role dedicada do kt-connect (SA kt-connect). Não é cluster-admin: lista só o
+# que o ktctl de fato usa, derivado do código-fonte (v0.3.7).
+#
+#   connect  -> cria/remove shadow pod + ConfigMap da chave SSH, abre
+#               port-forward (pods/portforward) e lê pods/services cluster-wide
+#               para calcular o CIDR das rotas e montar o DNS.
+#   preview  -> shadow pod + Service no cluster.
+#   forward  -> apenas pods/portforward.
+#   exchange -> router pod e patch do Service/Endpoints alvo; modo ephemeral usa
+#               pods/ephemeralcontainers; modo scale usa deployments/scale.
+#   mesh     -> router pod + Service e patch do Service alvo.
+#   clean/birdseye (limpeza) -> lista recursos e namespaces cluster-wide.
+rules:
+  # Leitura cluster-wide (pods/services = cálculo do CIDR e DNS; namespaces e
+  # nodes para descoberta).
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - endpoints
+      - configmaps
+      - namespaces
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  # Ciclo de vida dos shadow/router pods e do ConfigMap com a chave SSH.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - configmaps
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+  # Túnel SSH (connect/preview) e exec (exchange/mesh ephemeral).
+  - apiGroups: [""]
+    resources:
+      - pods/portforward
+      - pods/exec
+    verbs:
+      - create
+  - apiGroups: [""]
+    resources:
+      - pods/ephemeralcontainers
+    verbs:
+      - get
+      - update
+      - patch
+  # exchange/mesh trocam o selector do Service alvo e gerenciam Endpoints.
+  - apiGroups: [""]
+    resources:
+      - services
+      - endpoints
+    verbs:
+      - create
+      - update
+      - patch
+      - delete
+  # Workloads alvo do exchange (scale) e do router/mesh.
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - deployments/scale
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # birdseye/clean listam Ingress.
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+  # Discovery da API (client-go).
+  - nonResourceURLs:
+      - "*"
+    verbs:
+      - get

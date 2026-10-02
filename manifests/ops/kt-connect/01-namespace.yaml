@@ -1,0 +1,9 @@
+# kt-connect — túnel de desenvolvimento entre a máquina local e o cluster.
+#
+# O namespace hospeda apenas o RBAC do cliente (SA + token). O shadow pod do
+# `ktctl` é criado sob demanda no namespace alvo (por padrão, o do contexto do
+# kubeconfig) e some sozinho ao encerrar o comando. Ver README (seção kt-connect).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kt-connect
