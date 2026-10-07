@@ -500,6 +500,38 @@ scripts/kt.sh clean
 > `preview` it is where the local service is published. The wrapper only pins
 > `-n kt-connect` for `connect`; the other commands take `-n <ns>`.
 
+### Exposing a local application in the cluster (dev with live-reload)
+
+Instead of running the app in a pod with `hostPath` — which in this cluster
+points inside the **node's container**, not the host — **run the app on your
+machine and publish it into the cluster** with kt-connect. The code stays where
+live-reload works: no volume, no PV, nothing mounted from the host.
+
+```bash
+# 1) run the app locally with live-reload (e.g. tsx watch index.ts) on port 3000
+
+# 2) give the app access to cluster services (postgres/redis/opensearch in ns data):
+#    the host then resolves *.data.svc.cluster.local and routes the ClusterIPs
+sudo scripts/kt.sh connect --dnsMode hosts:data
+
+# 3) publish the local app into the cluster as a Service
+scripts/kt.sh preview my-api --expose 3000 -n my-ns
+```
+
+- `preview` creates the `my-api` Service in the target namespace pointing at the
+  local port (3000). In-cluster callers reach it via `my-api.my-ns.svc`; to expose
+  it by hostname, point an Ingress at that Service.
+- Already have a Service in the cluster and want to **divert** its traffic to your
+  local process? `scripts/kt.sh exchange <svc> --expose 3000 -n <ns>` (all
+  traffic) or `scripts/kt.sh mesh <svc> --expose 3000 -n <ns>` (only requests
+  carrying the header the command prints).
+- Editing the code triggers the local live-reload and the cluster already sees the
+  new version (the Service forwards to the local process). `Ctrl-C` removes the
+  Service and shadow pod; `scripts/kt.sh clean` sweeps leftovers.
+- The app runs **on your machine** (it must be powered on); the cluster only
+  routes. Env vars like `DB_HOST=postgres.data.svc.cluster.local` work thanks to
+  step 2.
+
 ### Notes
 
 - **Image**: the default is
