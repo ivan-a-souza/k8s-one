@@ -119,7 +119,7 @@ spec:
               memory: 192Mi
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 448Mi
           securityContext:
             allowPrivilegeEscalation: false
             seccompProfile:

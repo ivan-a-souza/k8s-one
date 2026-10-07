@@ -48,6 +48,7 @@ spec:
         # nó apertado. O proxy carrega o pacote inteiro + o client do Prisma:
         # subia a ~1Gi residente e reiniciava (OOM em nó apertado).
         # Aumentado em 24/09/2026: requests 1Gi / limits 3Gi, pra dar folga.
+        # Limit reduzido para 2Gi em 07/10/2026 (right-size; pico real ~1,4Gi).
         # O job de migrations, que faz menos, chegou a ~1,7Gi de pico.
         resources:
           requests:
@@ -55,7 +56,7 @@ spec:
             memory: 1Gi
           limits:
             cpu: "2"
-            memory: 3Gi
+            memory: 2Gi
 
         # Banco: a instância PostgreSQL compartilhada do ns data
         # (manifests/postgres/). A mesma instância serve o Authentik, em banco

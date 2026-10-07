@@ -146,7 +146,7 @@ spec:
               memory: 512Mi
             limits:
               cpu: "1"
-              memory: 1Gi
+              memory: 768Mi
           # /web/login é barato (não toca o banco a fundo). startupProbe
           # generoso: o primeiro boot roda init de módulos e tabelas a frio.
           startupProbe:

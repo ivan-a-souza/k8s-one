@@ -142,7 +142,7 @@ spec:
               memory: 256Mi
             limits:
               cpu: "1"
-              memory: 1Gi
+              memory: 768Mi
           # pg_isready NÃO autentica: só pergunta ao postmaster se ele aceita
           # conexões (0 = aceitando, 1 = recusando/em recovery, 2 = sem
           # resposta). -h 127.0.0.1 força o caminho TCP em vez do socket, e o

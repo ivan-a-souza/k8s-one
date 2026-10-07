@@ -70,7 +70,7 @@ spec:
             requests:
               memory: 256Mi
             limits:
-              memory: 1024Mi
+              memory: 768Mi
         additionalObjects:
           - apiVersion: cert-manager.io/v1
             kind: Certificate
