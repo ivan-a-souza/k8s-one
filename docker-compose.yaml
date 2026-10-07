@@ -8,6 +8,14 @@ services:
     hostname: k8s-one
     privileged: true
     cgroup: host
+    # Teto de memória do CONTAINER (control plane + runtime + cache). Os PODS
+    # NÃO entram aqui: eles têm teto próprio no cgroup irmão `kubepods`
+    # (memory.max ~9,4GiB, via enforceNodeAllocatable no kubelet).
+    # `memswap_limit == mem_limit` => `memory.swap.max=0` no cgroup do container:
+    # o control plane não empurra o host para swap. Os 6g são folga larga sobre
+    # o uso real (~1,9GiB) para não OOMar o runtime/página de cache.
+    mem_limit: 6g
+    memswap_limit: 6g
     environment:
       ARGOCD_VERSION: "${ARGOCD_VERSION:-v3.5.1}"
     tmpfs:

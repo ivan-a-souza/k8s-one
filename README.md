@@ -298,9 +298,12 @@ Three consequences worth internalising:
   `enforceNodeAllocatable` makes the kubelet set `memory.max` on the `kubepods` cgroup
   to *capacity − reserves* (`9898602496` = 9440 MiB), and the scheduler's 8.2 GiB is
   that figure minus the 1 GiB eviction margin. The cgroup driver is `cgroupfs`, so the
-  path is `/sys/fs/cgroup/kubepods` (no `.slice`). The container itself is unbounded
-  (`Memory: 0`), and control-plane processes run *outside* `kubepods`, covered only by
-  the `systemReserved` reservation — not by an enforced limit.
+  path is `/sys/fs/cgroup/kubepods` (no `.slice`). The container has its own **6 GiB**
+  cap (`mem_limit`/`memswap_limit` in `docker-compose.yaml`), so the control plane —
+  which runs *outside* `kubepods`, effectively covered only by that cap — cannot grow
+  unbounded, and `memswap_limit == mem_limit` zeroes the container's swap
+  (`memory.swap.max=0`): it does not push the host into swap. Pods stay limited
+  separately by `kubepods`.
 - **CPU has no cap at any layer.** `cpu.max` is unset (`max 100000`) on both the
   container and on `kubepods`, so pods can burst past the 3 CPU allocatable whenever
   the host has idle cycles. Only *scheduling* is bounded by the 3 CPU — consumption
