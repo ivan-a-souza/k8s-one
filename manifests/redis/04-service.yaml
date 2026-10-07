@@ -1,5 +1,6 @@
-# Redis so in-cluster: redis.data.svc.cluster.local:6379.
-# Sem NodePort/LoadBalancer/Ingress de proposito — nao ha exposicao externa.
+# Redis: redis.data.svc.cluster.local:6379 in-cluster + NodePort 30637 no host
+# (192.168.32.2:30637), mesmo padrao do postgres (NodePort 30432). O ClusterIP
+# continua valido para os consumidores in-cluster (ex.: naesquina-api).
 apiVersion: v1
 kind: Service
 metadata:
@@ -8,11 +9,12 @@ metadata:
   labels:
     app: redis
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: redis
   ports:
     - name: redis
       port: 6379
       targetPort: redis
+      nodePort: 30637
       protocol: TCP

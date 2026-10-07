@@ -1,4 +1,7 @@
-# OpenSearch API: so in-cluster (opensearch.data.svc:9200). Sem exposicao externa.
+# OpenSearch API: opensearch.data.svc:9200 in-cluster + NodePort 30920 no host
+# (192.168.32.2:30920), mesmo padrao do postgres (NodePort 30432). O ClusterIP
+# continua valido para os consumidores in-cluster (ex.: naesquina-api). A porta
+# `performance` (9600) fica so in-cluster.
 apiVersion: v1
 kind: Service
 metadata:
@@ -7,13 +10,14 @@ metadata:
   labels:
     app: opensearch
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: opensearch
   ports:
     - name: http
       port: 9200
       targetPort: http
+      nodePort: 30920
     - name: performance
       port: 9600
       targetPort: performance
