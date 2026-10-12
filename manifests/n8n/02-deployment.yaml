@@ -75,8 +75,9 @@ spec:
                   name: n8n-db
                   key: password
 
-            # --- URL pública / atrás do HAProxy (TLS terminado no Ingress) ---
-            # Sem N8N_HOST/WEBHOOK_URL a UI monta URLs de webhook erradas.
+            # URL pública / atrás do HAProxy (TLS terminado no Ingress).
+            # N8N_WEBHOOK_URL (não o antigo WEBHOOK_URL, que está deprecado) é a
+            # base para os webhooks de teste E de produção.
             - name: N8N_HOST
               value: n8n.lan
             - name: N8N_PROTOCOL
@@ -85,7 +86,7 @@ spec:
               value: "5678"
             - name: N8N_LISTEN_ADDRESS
               value: 0.0.0.0
-            - name: WEBHOOK_URL
+            - name: N8N_WEBHOOK_URL
               value: https://n8n.lan/
             - name: N8N_EDITOR_BASE_URL
               value: https://n8n.lan
@@ -115,10 +116,6 @@ spec:
             # Telemetria de diagnóstico desligada (privacidade).
             - name: N8N_DIAGNOSTICS_ENABLED
               value: "false"
-            # Task runners no modo interno (mesmo pod). Necessário para que os
-            # nós de Code/Tool rodem de forma isolada do processo principal.
-            - name: N8N_RUNNERS_ENABLED
-              value: "true"
           ports:
             - name: http
               containerPort: 5678
