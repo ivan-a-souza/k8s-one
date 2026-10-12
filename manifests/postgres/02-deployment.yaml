@@ -126,6 +126,9 @@ spec:
             - name: odoo-db
               mountPath: /run/secrets/odoo-db
               readOnly: true
+            - name: n8n-db
+              mountPath: /run/secrets/n8n-db
+              readOnly: true
             # readOnlyRootFilesystem exige estes dois: o socket da imagem
             # Debian fica em /var/run/postgresql (não em /tmp) e o diretório da
             # imagem é read-only. Mesmo arranjo do PG do authentik, que já roda
@@ -194,6 +197,10 @@ spec:
         - name: odoo-db
           secret:
             secretName: odoo-db
+            defaultMode: 0440
+        - name: n8n-db
+          secret:
+            secretName: n8n-db
             defaultMode: 0440
         - name: run
           emptyDir: {}

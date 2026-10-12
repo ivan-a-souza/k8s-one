@@ -1,5 +1,5 @@
 # Init do PostgreSQL 18: cria as roles e os bancos que as aplicações esperam
-# (litellm, authentik, odoo). Roda UMA vez, quando o PGDATA está vazio, como
+# (litellm, authentik, odoo, n8n). Roda UMA vez, quando o PGDATA está vazio, como
 # superusuário PELO SOCKET LOCAL (é o default `trust` do initdb para `local`).
 #
 # ⚠️ Em volume JÁ inicializado este script NÃO roda de novo: para uma role
@@ -69,6 +69,7 @@ data:
     create_role litellm   "$(cat /run/secrets/litellm-db/password)"
     create_role authentik "$(cat /run/secrets/authentik-db/password)"
     create_role odoo      "$(cat /run/secrets/odoo-db/password)"
+    create_role n8n       "$(cat /run/secrets/n8n-db/password)"
     # CREATEDB só para o odoo: ele cria bancos pela própria interface
     # (Database Manager). O create_role acima é least privilege por padrão
     # (NOSUPERUSER/NOCREATEDB/NOCREATEROLE).
@@ -77,6 +78,7 @@ data:
     create_db litellm   litellm
     create_db authentik authentik
     create_db odoo      odoo
+    create_db n8n       n8n
 
     # O schema dedicado do Prisma: o DATABASE_URL do LiteLLM traz
     # `?schema=litellm`. No PostgreSQL (15+) isso nem seria necessário — o

@@ -1,0 +1,19 @@
+# Certificado do n8n.lan, emitido pelo ClusterIssuer `local-ca` (a CA do
+# mkcert) — mesmo padrão de vault/argocd/headlamp/ceph/authentik/litellm/odoo.
+# Certificado por host: o wildcard *.lan é rejeitado por validadores.
+#
+# O ca.crt deste Secret é montado no oauth2-proxy para ele validar o issuer do
+# Authentik (mkcert) no discovery OIDC.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: n8n-tls
+  namespace: platform
+spec:
+  secretName: n8n-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: n8n.lan
+  dnsNames:
+    - n8n.lan

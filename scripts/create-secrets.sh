@@ -93,6 +93,20 @@ apply_yaml_secret manifests/argocd/odoo/secrets/odoo-db.yaml
 # a role com essa senha (o banco vive em `data`, o app em `odoo`).
 apply_yaml_secret_in_ns data manifests/argocd/odoo/secrets/odoo-db.yaml
 
+# n8n — credenciais do banco (chaves username / password). O ns `platform` já
+# existe (criado pelo app authentik). O n8n vive em `platform`, o banco em
+# `data`: o MESMO arquivo é aplicado nos dois — uma fonte de verdade só (o init
+# do postgres cria a role com essa senha).
+apply_yaml_secret manifests/argocd/n8n/secrets/n8n-db.yaml
+apply_yaml_secret_in_ns data manifests/argocd/n8n/secrets/n8n-db.yaml
+# n8n — chave de criptografia das credenciais (chave N8N_ENCRYPTION_KEY).
+# Precisa ser ESTÁVEL e ter backup: perder a chave = perder as credenciais.
+apply_env_secret platform n8n-secrets manifests/argocd/n8n/secrets/n8n-secrets.env
+# n8n — client OIDC do SSO via oauth2-proxy (chaves OAUTH2_PROXY_CLIENT_ID /
+# _SECRET / _COOKIE_SECRET). Os MESMOS valores estão em authentik.env como
+# N8N_OIDC_* — uma credencial, dois secrets.
+apply_env_secret platform oauth2-proxy manifests/argocd/n8n/secrets/oauth2-proxy.env
+
 # redis — senha do cache (chave password), lida como REDIS_PASSWORD (requirepass).
 apply_yaml_secret manifests/argocd/redis/secrets/redis-auth.yaml
 # pgadmin — login inicial (chaves PGADMIN_DEFAULT_EMAIL / PGADMIN_DEFAULT_PASSWORD).

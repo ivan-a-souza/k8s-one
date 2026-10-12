@@ -1,0 +1,24 @@
+# n8n — diretório de estado (/home/node/.n8n).
+#
+# A maior parte dos dados (workflows, credenciais, execuções) mora no
+# PostgreSQL (ns `data`); aqui fica o que a imagem guarda FORA do banco: a
+# chave de criptografia em arquivo, config local e o binary data no modo
+# filesystem (default da imagem).
+#
+# Prune=false,Delete=false pelo mesmo motivo do PVC do postgres/vaultwarden:
+# sem isto, o prune do Argo CD ou a exclusão da Application apagariam o volume.
+# O volume só sai por ação humana.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: n8n-data
+  namespace: platform
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi

@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# SEM 00-namespace.yaml, de propósito: o ns `platform` já existe (criado pelo
+# app `authentik`) e fica FORA do tracking deste app — é o que impede o
+# finalizer de apagar o namespace (e, em cascata, o PVC do n8n) ao excluir a
+# Application. Mesmo arranjo do app `odoo` no ns `odoo`.
+resources:
+  - 01-pvc.yaml
+  - 02-deployment.yaml
+  - 03-service.yaml
+  - 04-certificate.yaml
+  - 05-ingress.yaml
+  - 06-oauth2-proxy.yaml

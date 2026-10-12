@@ -1,0 +1,37 @@
+# Argo CD Application do n8n — automação de workflows no ns `platform`.
+#
+# Fonte: o PRÓPRIO repo GitOps (k8s-one), caminho manifests/n8n (com
+# kustomization.yaml; o Argo detecta kustomize sozinho). Mesmo padrão do
+# odoo/vaultwarden/postgres.
+#
+# O banco é o PostgreSQL 18 já existente no ns `data`: aqui NÃO há StatefulSet
+# de banco. A role/banco `n8n` são criados pelo init do postgres (ou à mão, se o
+# data-dir já estiver inicializado).
+#
+# Segredos `n8n-db`, `n8n-secrets` e `oauth2-proxy` NÃO estão no repo
+# (gitignored) — criar antes com:
+#   scripts/create-secrets.sh
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: n8n
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ivan-a-souza/k8s-one.git
+    targetRevision: main
+    path: manifests/n8n
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # O ns `platform` já existe (app authentik); CreateNamespace é idempotente
+      # e mantém o ns fora do tracking deste app (protege o PVC do n8n).
+      - CreateNamespace=true

@@ -575,3 +575,84 @@ data:
           group: !KeyOf argocd-admins-group
           order: 0
           enabled: true
+
+  # Provider OIDC que faz o LOGIN do n8n (ns platform, https://n8n.lan).
+  #
+  # O n8n Community NAO tem SSO nativo (e recurso Business/Enterprise), entao o
+  # fluxo OIDC e feito por um oauth2-proxy NA FRENTE do n8n (manifests/n8n/
+  # 06-oauth2-proxy.yaml). O provider aqui so entrega os claims; o redirect e o
+  # do PROXY (/oauth2/callback), nao o do n8n.
+  n8n-oidc.yaml: |
+    version: 1
+    metadata:
+      name: n8n-oidc
+      labels:
+        blueprints.goauthentik.io/description: Provider OIDC do n8n via oauth2-proxy (k8s-one)
+    entries:
+      # Grupo que controla quem entra no n8n.
+      - model: authentik_core.group
+        id: n8n-group
+        identifiers:
+          name: n8n-users
+        attrs:
+          name: n8n-users
+          users:
+            - !Find [authentik_core.user, [username, akadmin]]
+
+      - model: authentik_providers_oauth2.oauth2provider
+        id: n8n-provider
+        identifiers:
+          name: n8n
+        attrs:
+          name: n8n
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
+          client_type: confidential
+          # ArrayField com default vazio: sem declarar, o provider recusa todo
+          # grant (ver a nota no provider do litellm).
+          grant_types:
+            - authorization_code
+            - refresh_token
+          client_id: !Env N8N_OIDC_CLIENT_ID
+          client_secret: !Env N8N_OIDC_CLIENT_SECRET
+          signing_key: !Find [authentik_crypto.certificatekeypair, [name, "authentik Self-signed Certificate"]]
+          sub_mode: hashed_user_id
+          # id_token carrega os mesmos claims do userinfo (o oauth2-proxy le
+          # email/groups do proprio token).
+          include_claims_in_id_token: true
+          redirect_uris:
+            # Callback do oauth2-proxy (auth proxy na frente do n8n). O n8n em
+            # si NAO faz OIDC: quem faz o fluxo e o proxy.
+            - matching_mode: strict
+              url: https://n8n.lan/oauth2/callback
+          property_mappings:
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-openid"]]
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-email"]]
+            - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-profile"]]
+
+      - model: authentik_core.application
+        id: n8n-app
+        identifiers:
+          slug: n8n
+        attrs:
+          name: n8n
+          slug: n8n
+          provider: !KeyOf n8n-provider
+          # O slug define o issuer/discovery em /application/o/n8n/ — a URL que o
+          # oauth2-proxy consulta (OAUTH2_PROXY_OIDC_ISSUER_URL).
+          meta_launch_url: https://n8n.lan
+          meta_description: Automacao de workflows do cluster
+          meta_publisher: k8s-one
+          policy_engine_mode: any
+
+      # Binding de entrada: sem ele o provider existe mas ninguem autoriza.
+      - model: authentik_policies.policybinding
+        id: n8n-app-binding
+        identifiers:
+          target: !KeyOf n8n-app
+          group: !KeyOf n8n-group
+        attrs:
+          target: !KeyOf n8n-app
+          group: !KeyOf n8n-group
+          order: 0
+          enabled: true

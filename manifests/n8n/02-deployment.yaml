@@ -1,0 +1,165 @@
+# n8n (imagem OFICIAL) — automação de workflows, ns `platform`.
+#
+# Banco: a instância PostgreSQL 18 que já vive no ns `data` (Service
+# `postgres`), em banco PRÓPRIO (`n8n`), separado de litellm/authentik/odoo. A
+# role e o banco são criados pelo script de init do próprio postgres
+# (manifests/postgres/03-configmap-initdb.yaml) — a MESMA senha, vinda do mesmo
+# Secret `n8n-db` (scripts/create-secrets.sh), para não existir duas verdades.
+#
+# SSO: o n8n Community NÃO tem SSO nativo (é recurso Business/Enterprise). O
+# gate de login é feito por um oauth2-proxy NA FRENTE (manifests/n8n/
+# 06-oauth2-proxy.yaml), que fala OIDC com o Authentik. O Ingress aponta para o
+# PROXY, não para este Service. O n8n segue com o login próprio dele (login
+# duplo), mas o acesso à rede já é filtrado pelo Authentik.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n
+  namespace: platform
+  labels:
+    app: n8n
+spec:
+  replicas: 1
+  # Recreate: o diretório /home/node/.n8n é ReadWriteOnce e o nó é único. Com
+  # RollingUpdate o maxSurge tentaria subir um segundo pod disputando o mesmo
+  # PVC (mesmo raciocínio do postgres e do odoo).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: n8n
+  template:
+    metadata:
+      labels:
+        app: n8n
+    spec:
+      # uid/gid da imagem: o usuário `node` é 1000:1000 (conferido com
+      # `docker run --rm --entrypoint id n8nio/n8n:2.42.7`).
+      # fsGroup é OBRIGATÓRIO no PVC (local-path entrega o diretório raiz como
+      # root:root e o kubelet só concede o grupo ao aplicar o fsGroup).
+      # OnRootMismatch (e não Always) evita o chown recursivo a cada boot.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: n8n
+          image: n8nio/n8n:2.42.7
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            # --- Banco: a instância compartilhada do ns data ---
+            - name: DB_TYPE
+              value: postgresdb
+            - name: DB_POSTGRESDB_HOST
+              value: postgres.data.svc.cluster.local
+            - name: DB_POSTGRESDB_PORT
+              value: "5432"
+            - name: DB_POSTGRESDB_DATABASE
+              value: n8n
+            - name: DB_POSTGRESDB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-db
+                  key: username
+            - name: DB_POSTGRESDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-db
+                  key: password
+
+            # --- URL pública / atrás do HAProxy (TLS terminado no Ingress) ---
+            # Sem N8N_HOST/WEBHOOK_URL a UI monta URLs de webhook erradas.
+            - name: N8N_HOST
+              value: n8n.lan
+            - name: N8N_PROTOCOL
+              value: https
+            - name: N8N_PORT
+              value: "5678"
+            - name: N8N_LISTEN_ADDRESS
+              value: 0.0.0.0
+            - name: WEBHOOK_URL
+              value: https://n8n.lan/
+            - name: N8N_EDITOR_BASE_URL
+              value: https://n8n.lan
+            # 1 salto de proxy na frente (o HAProxy ingress). Sem isto o n8n
+            # não confia no X-Forwarded-For e logs/rate-limit ficam errados.
+            - name: N8N_PROXY_HOPS
+              value: "1"
+            # Cookie de sessão só via HTTPS (já temos TLS no ingress).
+            - name: N8N_SECURE_COOKIE
+              value: "true"
+
+            # --- Chave de criptografia ---
+            # Decripta as credenciais salvas. Precisa ser ESTÁVEL entre boots e
+            # ter backup: perder a chave = perder todas as credenciais dos
+            # workflows. Vem do Secret `n8n-secrets` (gitignored).
+            - name: N8N_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: N8N_ENCRYPTION_KEY
+
+            # --- Diversos ---
+            - name: GENERIC_TIMEZONE
+              value: America/Sao_Paulo
+            - name: TZ
+              value: America/Sao_Paulo
+            # Telemetria de diagnóstico desligada (privacidade).
+            - name: N8N_DIAGNOSTICS_ENABLED
+              value: "false"
+            # Task runners no modo interno (mesmo pod). Necessário para que os
+            # nós de Code/Tool rodem de forma isolada do processo principal.
+            - name: N8N_RUNNERS_ENABLED
+              value: "true"
+          ports:
+            - name: http
+              containerPort: 5678
+          volumeMounts:
+            - name: data
+              mountPath: /home/node/.n8n
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          # /healthz/readiness só responde 200 quando o n8n terminou de subir e
+          # as migrações do banco passaram. /healthz é o liveness.
+          startupProbe:
+            httpGet:
+              path: /healthz/readiness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60      # até ~10 min no primeiro boot (migrações)
+          readinessProbe:
+            httpGet:
+              path: /healthz/readiness
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: n8n-data
+        - name: tmp
+          emptyDir: {}

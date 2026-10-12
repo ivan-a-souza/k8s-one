@@ -1,0 +1,130 @@
+# oauth2-proxy — auth proxy na frente do n8n (login via Authentik).
+#
+# Por que existe: o n8n Community NÃO tem SSO nativo (é recurso
+# Business/Enterprise). O oauth2-proxy é o gate de login: sem sessão oauth2
+# válida (contra o Authentik), nada chega ao n8n. Mesmo padrão já usado na
+# frente do Headlamp (manifests/ops/headlamp/09-oauth2-proxy.yaml).
+#
+# Fluxo: navegador -> ingress (n8n.lan) -> ESTE proxy -> n8n.
+#
+# ⚠️ Login duplo (limitação da versão Community): o proxy autentica no
+# Authentik para dar acesso à rede, mas o n8n ainda mostra o login próprio
+# dele. O Authentik não injeta identidade no n8n (a Community não lê headers).
+#
+# ⚠️ Webhooks/forms/triggers são chamados por sistemas EXTERNOS sem sessão
+# oauth2 — por isso os caminhos de gatilho ficam FORA do gate (skip-auth-route,
+# abaixo). O resto (editor/UI/REST de admin) exige login.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: platform
+  labels:
+    app: oauth2-proxy
+    component: n8n-auth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oauth2-proxy
+      component: n8n-auth
+  template:
+    metadata:
+      labels:
+        app: oauth2-proxy
+        component: n8n-auth
+    spec:
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
+          args:
+            - --config=/dev/null
+            # CA do mkcert passada como ARG: o env singular é ignorado (o
+            # correto seria plural); mantido como arg por ser explícito.
+            - --provider-ca-file=/certs/ca.crt
+            # O Authentik emite o id_token com email_verified=false. Sem isto o
+            # callback morre com "email in id_token (...) isn't verified" (500).
+            - --insecure-oidc-allow-unverified-email=true
+            # Caminhos de gatilho chamados de FORA sem sessão: ficam fora do
+            # gate. `--skip-auth-route` é lista de regex e vai como ARG (cada
+            # regex tem caracteres que o parsing por env atrapalharia).
+            #   /webhook, /webhook-test, /webhook-waiting -> Webhook/Chat/... 
+            #   /form -> Form Trigger
+            #   /healthz -> probes
+            # O REST de admin (/rest, /api/v1) CONTINUA exigindo login.
+            - --skip-auth-route=^/webhook
+            - --skip-auth-route=^/form
+            - --skip-auth-route=^/healthz
+          ports:
+            - name: http
+              containerPort: 4180
+          # Client id/secret (mesmo provider "n8n" do Authentik) e cookie secret
+          # vêm do Secret gitignored `oauth2-proxy` (ns platform).
+          envFrom:
+            - secretRef:
+                name: oauth2-proxy
+          env:
+            - name: OAUTH2_PROXY_PROVIDER
+              value: oidc
+            - name: OAUTH2_PROXY_OIDC_ISSUER_URL
+              value: https://authentik.lan/application/o/n8n/
+            # Upstream = o próprio n8n (após autenticado). Opções de LISTA usam
+            # env PLURAL (trailing S); o singular é ignorado em silêncio.
+            - name: OAUTH2_PROXY_UPSTREAMS
+              value: http://n8n.platform.svc.cluster.local:5678
+            - name: OAUTH2_PROXY_HTTP_ADDRESS
+              value: 0.0.0.0:4180
+            - name: OAUTH2_PROXY_REDIRECT_URL
+              value: https://n8n.lan/oauth2/callback
+            # Atrás do ingress HAProxy (que termina TLS e manda X-Forwarded-*).
+            - name: OAUTH2_PROXY_REVERSE_PROXY
+              value: "true"
+            - name: OAUTH2_PROXY_COOKIE_SECURE
+              value: "true"
+            - name: OAUTH2_PROXY_COOKIE_DOMAINS
+              value: n8n.lan
+            - name: OAUTH2_PROXY_EMAIL_DOMAINS
+              value: "*"
+            - name: OAUTH2_PROXY_SCOPE
+              value: openid profile email
+            - name: OAUTH2_PROXY_SKIP_PROVIDER_BUTTON
+              value: "true"
+          volumeMounts:
+            - name: mkcert-ca
+              mountPath: /certs
+              readOnly: true
+          resources:
+            requests:
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: mkcert-ca
+          secret:
+            secretName: n8n-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: platform
+  labels:
+    app: oauth2-proxy
+    component: n8n-auth
+spec:
+  selector:
+    app: oauth2-proxy
+    component: n8n-auth
+  ports:
+    - name: http
+      port: 80
+      targetPort: 4180

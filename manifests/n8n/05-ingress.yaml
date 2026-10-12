@@ -1,0 +1,41 @@
+# Ingress do n8n em https://n8n.lan
+#
+# ⚠️ O backend é o SERVICE DO oauth2-proxy, e não o Service do n8n: o proxy faz
+# o login OIDC contra o Authentik e só então encaminha para o n8n. O caminho
+# /oauth2/* é tratado pelo próprio proxy.
+#
+# O cluster não tem IngressClass: roteia pela annotation
+# haproxy.org/ingress.class, igual ao resto do repositório.
+#
+# ⚠️ Pendência de DNS: o AdGuard (ns networking) responde os hosts `.lan` por
+# rewrite POR HOST, não por wildcard — é preciso criar o rewrite
+# `n8n.lan -> 192.168.1.20` no AdGuard, senão o nome não resolve (o Ingress
+# sozinho não basta). Dentro do cluster, a linha de hosts do CoreDNS cobre.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: n8n
+  namespace: platform
+  annotations:
+    haproxy.org/ingress.class: haproxy
+    haproxy.org/ssl-cert-namespace: platform
+    haproxy.org/ssl-cert: n8n-tls
+    # Workflows podem ter execuções/HTTP longos: folga no timeout.
+    haproxy.org/timeout-server: "300s"
+    haproxy.org/timeout-client: "300s"
+spec:
+  tls:
+    - hosts:
+        - n8n.lan
+      secretName: n8n-tls
+  rules:
+    - host: n8n.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth2-proxy
+                port:
+                  number: 80
