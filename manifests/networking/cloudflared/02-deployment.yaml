@@ -74,9 +74,9 @@ spec:
               memory: 32Mi
             limits:
               memory: 128Mi
-          # /ready só responde 200 quando o conector estabeleceu as conexões; é
-          # o readiness correto. Liveness usa /live (processo vivo, não derruba
-          # por oscilação de túnel).
+          # Endpoints do metrics server do cloudflared: `/ready` (200 quando o
+          # conector tem túnel, 503 enquanto não) e `/healthcheck` (processo
+          # vivo). NÃO existe `/live` (dá 404) — usá-lo derrubava o pod.
           readinessProbe:
             httpGet:
               path: /ready
@@ -85,7 +85,7 @@ spec:
             periodSeconds: 15
           livenessProbe:
             httpGet:
-              path: /live
+              path: /healthcheck
               port: metrics
             initialDelaySeconds: 10
             periodSeconds: 30
