@@ -1,4 +1,4 @@
-# Ingress do n8n em https://n8n.lan
+# Ingress do n8n em https://n8n.naesquina.com.br
 #
 # ⚠️ O backend é o SERVICE DO oauth2-proxy, e não o Service do n8n: o proxy faz
 # o login OIDC contra o Authentik e só então encaminha para o n8n. O caminho
@@ -7,10 +7,15 @@
 # O cluster não tem IngressClass: roteia pela annotation
 # haproxy.org/ingress.class, igual ao resto do repositório.
 #
-# ⚠️ Pendência de DNS: o AdGuard (ns networking) responde os hosts `.lan` por
-# rewrite POR HOST, não por wildcard — é preciso criar o rewrite
-# `n8n.lan -> 192.168.1.20` no AdGuard, senão o nome não resolve (o Ingress
-# sozinho não basta). Dentro do cluster, a linha de hosts do CoreDNS cobre.
+# Dois caminhos chegam aqui, no MESMO host (split-horizon):
+#   - EXTERNO: navegador → Cloudflare (TLS) → tunnel k8s-one → cloudflared →
+#     HAProxy:80 (HTTP) → este Ingress. O TLS público é o da Cloudflare.
+#   - INTERNO: navegador da LAN/tailnet resolve o nome via AdGuard/CoreDNS para
+#     o HAProxy:443 → este Ingress com o cert mkcert (n8n-tls).
+#
+# ⚠️ DNS: o AdGuard responde hosts por rewrite POR HOST (não wildcard) — é
+# preciso o rewrite `n8n.naesquina.com.br -> 192.168.1.20`. Dentro do cluster, a
+# linha de hosts do CoreDNS cobre.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -26,10 +31,10 @@ metadata:
 spec:
   tls:
     - hosts:
-        - n8n.lan
+        - n8n.naesquina.com.br
       secretName: n8n-tls
   rules:
-    - host: n8n.lan
+    - host: n8n.naesquina.com.br
       http:
         paths:
           - path: /

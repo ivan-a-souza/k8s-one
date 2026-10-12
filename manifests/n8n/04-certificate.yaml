@@ -1,9 +1,12 @@
-# Certificado do n8n.lan, emitido pelo ClusterIssuer `local-ca` (a CA do
-# mkcert) — mesmo padrão de vault/argocd/headlamp/ceph/authentik/litellm/odoo.
-# Certificado por host: o wildcard *.lan é rejeitado por validadores.
+# Certificado do n8n.naesquina.com.br, emitido pelo ClusterIssuer `local-ca` (a
+# CA do mkcert) — mesmo padrão de vault/argocd/headlamp/ceph/authentik/litellm/odoo.
+# Certificado por host: o wildcard é rejeitado por validadores.
 #
-# O ca.crt deste Secret é montado no oauth2-proxy para ele validar o issuer do
-# Authentik (mkcert) no discovery OIDC.
+# O host é o DOMÍNIO PÚBLICO. Ele serve o TLS INTERNO (clientes da LAN/tailnet
+# que batem em HAProxy:443 via split-horizon e confiam na CA do mkcert); no
+# acesso PÚBLICO o TLS é terminado pela Cloudflare (cert dela na borda) e o
+# trecho túnel→HAProxy é HTTP. O `ca.crt` deste Secret é montado no oauth2-proxy
+# para ele validar o issuer (auth.naesquina.com.br, também mkcert) no discovery.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -14,6 +17,6 @@ spec:
   issuerRef:
     name: local-ca
     kind: ClusterIssuer
-  commonName: n8n.lan
+  commonName: n8n.naesquina.com.br
   dnsNames:
-    - n8n.lan
+    - n8n.naesquina.com.br

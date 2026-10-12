@@ -622,9 +622,11 @@ data:
           include_claims_in_id_token: true
           redirect_uris:
             # Callback do oauth2-proxy (auth proxy na frente do n8n). O n8n em
-            # si NAO faz OIDC: quem faz o fluxo e o proxy.
+            # si NAO faz OIDC: quem faz o fluxo e o proxy. Host canonico = o
+            # dominio PUBLICO (acesso externo via tunel Cloudflare e interno via
+            # split-horizon); o antigo n8n.lan foi removido.
             - matching_mode: strict
-              url: https://n8n.lan/oauth2/callback
+              url: https://n8n.naesquina.com.br/oauth2/callback
           property_mappings:
             - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-openid"]]
             - !Find [authentik_core.propertymapping, [managed, "goauthentik.io/providers/oauth2/scope-email"]]

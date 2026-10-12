@@ -1,6 +1,6 @@
 # ClusterIP: quem fala com o n8n é o oauth2-proxy (auth proxy na frente) e, se
 # precisar, `kubectl port-forward` para manutenção. NÃO expor NodePort: o acesso
-# de fora já acontece pelo Ingress (n8n.lan -> oauth2-proxy -> este Service).
+# de fora já acontece pelo Ingress (n8n.naesquina.com.br -> oauth2-proxy -> este Service).
 apiVersion: v1
 kind: Service
 metadata:

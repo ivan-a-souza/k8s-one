@@ -1,0 +1,100 @@
+# cloudflared — conector do túnel Cloudflare `k8s-one` (ns networking).
+#
+# 1 réplica: o cluster é SINGLE-NODE. Duas réplicas do mesmo túnel só dão HA se
+# caírem em nós diferentes; aqui cairiam no mesmo nó (mesmo domínio de falha) e
+# só consumiriam RAM, que é o recurso mais escasso. (A conversa do ChatGPT
+# recomendava 2 réplicas — conselho genérico multi-node; não se aplica.)
+#
+# Único upstream: o HAProxy Ingress (ver 01-configmap.yaml). TLS termina na
+# Cloudflare; o trecho cloudflared→HAProxy é HTTP :80 (sem redirect, para não
+# entrar em loop).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: networking
+  labels:
+    app: cloudflared
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudflared
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      securityContext:
+        # A imagem oficial roda como `nonroot` (65532); fixamos por segurança.
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+      containers:
+        - name: cloudflared
+          # Última estável (o próprio cloudflared avisou para subir de 2026.9.3
+          # para 2026.10.0). Pinada — não usar `latest` flutuante.
+          image: cloudflare/cloudflared:2026.10.0
+          imagePullPolicy: IfNotPresent
+          # O `tunnel run` lê o config.yml (--config). O token/credentials fica
+          # no Secret montado; nada de segredo em linha de comando.
+          args:
+            - tunnel
+            - --config=/etc/cloudflared/config.yml
+            - --metrics=0.0.0.0:2000
+            - run
+          env:
+            - name: HOME
+              value: /tmp
+          ports:
+            - name: metrics
+              containerPort: 2000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cloudflared/config.yml
+              subPath: config.yml
+              readOnly: true
+            # Mesmo caminho/nome que o `credentials-file` do config.yml.
+            - name: credentials
+              mountPath: /etc/cloudflared/f5f335c3-0815-4f30-8a9a-2d3e8f5bb61c.json
+              subPath: f5f335c3-0815-4f30-8a9a-2d3e8f5bb61c.json
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          # /ready só responde 200 quando o conector estabeleceu as conexões; é
+          # o readiness correto. Liveness usa /live (processo vivo, não derruba
+          # por oscilação de túnel).
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: cloudflared-config
+        - name: credentials
+          secret:
+            secretName: cloudflared-credentials
+        - name: tmp
+          emptyDir: {}

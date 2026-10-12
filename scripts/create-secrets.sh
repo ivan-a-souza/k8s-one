@@ -107,6 +107,11 @@ apply_env_secret platform n8n-secrets manifests/argocd/n8n/secrets/n8n-secrets.e
 # N8N_OIDC_* — uma credencial, dois secrets.
 apply_env_secret platform oauth2-proxy manifests/argocd/n8n/secrets/oauth2-proxy.env
 
+# cloudflared — credenciais do túnel Cloudflare `k8s-one` (ns networking).
+# O `credentials-file` do config.yml (manifests/networking/cloudflared) aponta
+# para a chave f5f335c3-...json deste Secret.
+apply_yaml_secret manifests/networking/cloudflared/secrets/cloudflared-credentials.yaml
+
 # redis — senha do cache (chave password), lida como REDIS_PASSWORD (requirepass).
 apply_yaml_secret manifests/argocd/redis/secrets/redis-auth.yaml
 # pgadmin — login inicial (chaves PGADMIN_DEFAULT_EMAIL / PGADMIN_DEFAULT_PASSWORD).

@@ -1,0 +1,30 @@
+# Argo CD Application do cloudflared (túnel Cloudflare `k8s-one`) no ns `networking`.
+#
+# Fonte: o PRÓPRIO repo GitOps (k8s-one), caminho manifests/networking/cloudflared
+# (kustomize). O ns `networking` é o lar dos componentes de rede (AdGuard) —
+# reusado aqui (o Argo só toca os recursos dele).
+#
+# Segredo `cloudflared-credentials` NÃO está no repo (gitignored) — criar com:
+#   scripts/create-secrets.sh
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cloudflared
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ivan-a-souza/k8s-one.git
+    targetRevision: main
+    path: manifests/networking/cloudflared
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: networking
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

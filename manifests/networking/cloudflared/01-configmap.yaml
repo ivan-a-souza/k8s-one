@@ -1,0 +1,34 @@
+# cloudflared — config do túnel Cloudflare `k8s-one` (ns networking).
+#
+# Modelo SPLIT: este túnel serve SÓ hostnames que são apps DO CLUSTER. Os
+# hostnames que são serviços do host (nginx do infra) continuam no túnel do
+# host — o nginx do host escuta só 127.0.0.1:8090 e não é alcançável por pod.
+#
+# Um único origin: o HAProxy Ingress. O cloudflared NÃO conhece cada app; o
+# Ingress resolve por Host. Assim a borda é da Cloudflare e o roteamento
+# interno é do Kubernetes (sem duplicar regras).
+#
+# O `credentials-file` é montado do Secret `cloudflared-credentials` (gitignored)
+# no MESMO caminho/nome declarado aqui.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudflared-config
+  namespace: networking
+data:
+  config.yml: |
+    tunnel: f5f335c3-0815-4f30-8a9a-2d3e8f5bb61c
+    credentials-file: /etc/cloudflared/f5f335c3-0815-4f30-8a9a-2d3e8f5bb61c.json
+    no-autoupdate: true
+
+    ingress:
+      # n8n (UI + webhooks) — host canônico público. O gate de SSO é o
+      # oauth2-proxy na frente do n8n; os caminhos de webhook/form furam o proxy.
+      - hostname: n8n.naesquina.com.br
+        service: http://haproxy-kubernetes-ingress.haproxy-controller.svc.cluster.local:80
+      # Authentik público — necessário para completar o fluxo OIDC do n8n
+      # externo (o navegador é redirecionado para o issuer authoriz/end-session).
+      - hostname: auth.naesquina.com.br
+        service: http://haproxy-kubernetes-ingress.haproxy-controller.svc.cluster.local:80
+      # Catch-all: qualquer outro Host num túnel self-managed responde 404.
+      - service: http_status:404

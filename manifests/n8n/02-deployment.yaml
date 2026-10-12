@@ -78,8 +78,11 @@ spec:
             # URL pública / atrás do HAProxy (TLS terminado no Ingress).
             # N8N_WEBHOOK_URL (não o antigo WEBHOOK_URL, que está deprecado) é a
             # base para os webhooks de teste E de produção.
+            # Host canônico = o domínio PÚBLICO (n8n.naesquina.com.br), usado
+            # tanto no acesso externo (via túnel Cloudflare) quanto no interno
+            # (split-horizon → HAProxy). O antigo n8n.lan foi removido.
             - name: N8N_HOST
-              value: n8n.lan
+              value: n8n.naesquina.com.br
             - name: N8N_PROTOCOL
               value: https
             - name: N8N_PORT
@@ -87,9 +90,9 @@ spec:
             - name: N8N_LISTEN_ADDRESS
               value: 0.0.0.0
             - name: N8N_WEBHOOK_URL
-              value: https://n8n.lan/
+              value: https://n8n.naesquina.com.br/
             - name: N8N_EDITOR_BASE_URL
-              value: https://n8n.lan
+              value: https://n8n.naesquina.com.br
             # 1 salto de proxy na frente (o HAProxy ingress). Sem isto o n8n
             # não confia no X-Forwarded-For e logs/rate-limit ficam errados.
             - name: N8N_PROXY_HOPS

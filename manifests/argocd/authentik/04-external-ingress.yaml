@@ -1,0 +1,56 @@
+# Authentik — exposição PÚBLICA (auth.naesquina.com.br), ns platform.
+#
+# Aplicado à mão (`kubectl apply -f`) junto com o load do blueprint — NÃO vai
+# pelos values do chart: o chart templa o ingress de `authentik.lan` a partir
+# da lista `server.ingress.hosts`, e mexer nela exigiria re-aplicar a Application
+# inteira. Um Ingress separado para o domínio externo é mais simples e não
+# altera o que já funciona.
+#
+# Por que o Authentik precisa disto: o SSO do n8n (via oauth2-proxy) redireciona
+# o NAVEGADOR para o issuer do Authentik (authorize/end-session). Para o n8n
+# externo funcionar, o issuer também tem de ser público. O issuer é derivado do
+# `Host` da requisição, então `auth.naesquina.com.br/application/o/n8n/...`
+# devolve o issuer no domínio público.
+#
+# Dois caminhos no MESMO host (split-horizon):
+#   - EXTERNO: Cloudflare (TLS) → tunnel k8s-one → cloudflared → HAProxy:80 → aqui.
+#   - INTERNO: LAN/tailnet resolve para o HAProxy:443 → aqui (cert mkcert).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: authentik-external-tls
+  namespace: platform
+spec:
+  secretName: authentik-external-tls
+  issuerRef:
+    name: local-ca
+    kind: ClusterIssuer
+  commonName: auth.naesquina.com.br
+  dnsNames:
+    - auth.naesquina.com.br
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: authentik-external
+  namespace: platform
+  annotations:
+    haproxy.org/ingress.class: haproxy
+    haproxy.org/ssl-cert-namespace: platform
+    haproxy.org/ssl-cert: authentik-external-tls
+spec:
+  tls:
+    - hosts:
+        - auth.naesquina.com.br
+      secretName: authentik-external-tls
+  rules:
+    - host: auth.naesquina.com.br
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: authentik-server
+                port:
+                  number: 80
