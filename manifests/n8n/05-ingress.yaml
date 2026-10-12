@@ -25,6 +25,12 @@ metadata:
     haproxy.org/ingress.class: haproxy
     haproxy.org/ssl-cert-namespace: platform
     haproxy.org/ssl-cert: n8n-tls
+    # DESLIGA o redirect HTTP->HTTPS DESTE host. O túnel Cloudflare entrega em
+    # HTTP :80 (o TLS termina na Cloudflare); com o redirect ligado (default do
+    # ingress), o HAProxy devolveria 302 para https://host:443 e o navegador
+    # voltaria pela Cloudflare -> loop infinito. Sem o redirect, o :80 serve o
+    # backend direto. O acesso INTERNO via :443 continua com TLS normal.
+    haproxy.org/ssl-redirect: "false"
     # Workflows podem ter execuções/HTTP longos: folga no timeout.
     haproxy.org/timeout-server: "300s"
     haproxy.org/timeout-client: "300s"
