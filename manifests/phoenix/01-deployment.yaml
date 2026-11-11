@@ -1,0 +1,212 @@
+# Phoenix (Arize) — observabilidade de LLM no ns `platform`.
+#
+# Por que Phoenix e não Langfuse: Langfuse v4 exige ClickHouse + MinIO + web +
+# worker (~1,5-2 GiB e 6 manifests). O Phoenix é UM container, usa o PostgreSQL
+# que já existe no ns `data` e mediu 505 MiB de RSS em teste local (teto de
+# 768m, versão 21.0.0). Neste host, com ~3,6 GB livres e o k8s já em 204% do
+# allocatable, a diferença é a diferença entre caber e não caber.
+#
+# O que ele recebe: spans OTLP do LiteLLM (callback `otel`). Cada chamada de
+# modelo vira um trace com prompt, resposta, latência, tokens e custo.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: phoenix
+  namespace: platform
+  labels:
+    app: phoenix
+spec:
+  replicas: 1
+  # Recreate, não RollingUpdate: com 1 réplica e um nó só, maxSurge subiria dois
+  # Phoenix ao mesmo tempo (~500 MiB cada) num host que não tem essa folga.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: phoenix
+  template:
+    metadata:
+      labels:
+        app: phoenix
+    spec:
+      # O k8s injeta env vars de "service links" para cada Service do ns. Com um
+      # Service chamado `phoenix`, isso vira `PHOENIX_PORT=tcp://10.x.x.x:6006`
+      # — e o Phoenix lê PHOENIX_PORT esperando um INTEIRO, então morre no
+      # import com ValueError (perdido antes do log aparecer, exit 1 mudo).
+      # Desligar os links resolve na origem; as duas envs explícitas de porta
+      # (abaixo) são a segunda barreira.
+      enableServiceLinks: false
+      containers:
+        - name: phoenix
+          # Versão fixa: `latest` muda de comportamento sem mudar o Git. A
+          # 21.0.0 é a que foi medida (505 MiB) e testada com ingestão OTLP.
+          image: arizephoenix/phoenix:21.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 6006
+            - name: otlp-grpc
+              containerPort: 4317
+          env:
+            # --- autenticação ---
+            # A doc do Phoenix diz que auth vem desligada por padrão, mas na
+            # 21.0.0 veio LIGADA (401 Invalid token na ingestão). Declarar
+            # explícito evita depender do default da versão.
+            - name: PHOENIX_ENABLE_AUTH
+              value: "True"
+            # Assina os JWT de sessão. Perder = todo mundo desloga.
+            - name: PHOENIX_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: phoenix-env
+                  key: PHOENIX_SECRET
+            # Basic auth segue LIGADO de propósito: é o caminho de entrada se o
+            # OIDC do Authentik quebrar. Desligar só depois de validar login
+            # pelo SSO (PHOENIX_DISABLE_BASIC_AUTH=True).
+            - name: PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: phoenix-env
+                  key: PHOENIX_DEFAULT_ADMIN_INITIAL_PASSWORD
+
+            # --- banco ---
+            # PostgreSQL do ns data (mesma instância do litellm/odoo/n8n;
+            # role e banco `phoenix` criados pelo init do postgres).
+            # Os $(VAR) abaixo são expandidos pelo kubelet a partir das duas
+            # envs imediatamente anteriores — por isso elas vêm antes.
+            - name: PHOENIX_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: phoenix-db
+                  key: username
+            - name: PHOENIX_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: phoenix-db
+                  key: password
+            - name: PHOENIX_SQL_DATABASE_URL
+              value: postgresql://$(PHOENIX_DB_USER):$(PHOENIX_DB_PASSWORD)@postgres.data.svc.cluster.local:5432/phoenix
+
+            # --- OIDC via Authentik ---
+            # Provider/app `phoenix` criados pelo blueprint phoenix-oidc
+            # (manifests/argocd/authentik/03-blueprint.yaml).
+            - name: PHOENIX_OAUTH2_AUTHENTIK_OIDC_CONFIG_URL
+              value: https://authentik.lan/application/o/phoenix/.well-known/openid-configuration
+            - name: PHOENIX_OAUTH2_AUTHENTIK_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: phoenix-env
+                  key: PHOENIX_OIDC_CLIENT_ID
+            - name: PHOENIX_OAUTH2_AUTHENTIK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: phoenix-env
+                  key: PHOENIX_OIDC_CLIENT_SECRET
+            - name: PHOENIX_OAUTH2_AUTHENTIK_DISPLAY_NAME
+              value: Authentik
+            # `groups` vai além do baseline (openid email profile) e só sai no
+            # token porque o provider declara o scope mapping "Phoenix Groups".
+            - name: PHOENIX_OAUTH2_AUTHENTIK_SCOPES
+              value: groups
+            - name: PHOENIX_OAUTH2_AUTHENTIK_GROUPS_ATTRIBUTE_PATH
+              value: groups
+            # Quem não está no grupo phoenix-users do Authentik não entra.
+            # Sem isto, qualquer usuário ativo do Authentik entraria.
+            - name: PHOENIX_OAUTH2_AUTHENTIK_ALLOWED_GROUPS
+              value: phoenix-users
+            - name: PHOENIX_OAUTH2_AUTHENTIK_ALLOW_SIGN_UP
+              value: "True"
+
+            # --- TLS para falar com o authentik ---
+            # O certificado do authentik.lan é do mkcert e não está no bundle do
+            # Debian da imagem. O bundle é CONCATENADO (não substituído), senão
+            # qualquer chamada HTTPS para fora (ex.: API da Arize, se um dia
+            # usada) quebraria.
+            - name: SSL_CERT_FILE
+              value: /certs/ca-bundle.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /certs/ca-bundle.crt
+            - name: CURL_CA_BUNDLE
+              value: /certs/ca-bundle.crt
+
+            # --- diretório de trabalho ---
+            # Phoenix usa o working dir para artefatos (wasm sandbox, datasets).
+            # emptyDir porque o dado que importa está no PostgreSQL.
+            - name: PHOENIX_WORKING_DIR
+              value: /phoenix-data
+            # Porta explícita: ver enableServiceLinks acima.
+            - name: PHOENIX_PORT
+              value: "6006"
+            - name: PHOENIX_HOST
+              value: "0.0.0.0"
+            # Não derive o callback OIDC do request HTTP que chega do ingress:
+            # a origem canônica preserva https://phoenix.lan no redirect URI.
+            - name: PHOENIX_ROOT_URL
+              value: https://phoenix.lan
+          volumeMounts:
+            - name: phoenix-data
+              mountPath: /phoenix-data
+            - name: ca-bundle
+              mountPath: /certs
+              readOnly: true
+          # Probes por HTTP em `/`: verificado no teste local, responde 200.
+          # Timeouts com folga — este host tem 4 núcleos compartilhados com o
+          # desktop inteiro e timeout curto vira falso "Unhealthy" em massa.
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            # Medido: 505 MiB de pico pós-boot. 1Gi dá folga de 2x sem inflar o
+            # requests (que é o que o scheduler enxerga).
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      initContainers:
+        - name: ca-bundle
+          # Alpine, não a imagem do Phoenix: ela é distroless (ENTRYPOINT
+          # /usr/bin/python3.13) e NÃO tem `sh` — usar ela aqui morre com
+          # `exec: "sh": executable file not found in $PATH`.
+          image: alpine:3.20
+          command: ["sh", "-c"]
+          args:
+            - cat /etc/ssl/certs/ca-certificates.crt /mkcert/ca.crt > /certs/ca-bundle.crt
+          volumeMounts:
+            - name: mkcert-ca
+              mountPath: /mkcert
+              readOnly: true
+            - name: ca-bundle
+              mountPath: /certs
+      volumes:
+        - name: phoenix-data
+          emptyDir: {}
+        # A raiz do mkcert vem do próprio secret do cert-manager (todo secret
+        # tls emitido pelo ClusterIssuer local-ca carrega `ca.crt`).
+        - name: mkcert-ca
+          secret:
+            secretName: phoenix-tls
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: ca-bundle
+          emptyDir: {}

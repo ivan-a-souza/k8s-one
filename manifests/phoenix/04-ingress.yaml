@@ -1,0 +1,33 @@
+# Ingress da UI do Phoenix em https://phoenix.lan
+#
+# O cluster não tem IngressClass (todos os ingresses ativos estão com CLASS
+# <none> e roteiam pela annotation haproxy.org/ingress.class) — vazio de
+# propósito, igual ao resto do repositório.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: phoenix
+  namespace: platform
+  annotations:
+    haproxy.org/ingress.class: haproxy
+    haproxy.org/ssl-cert-namespace: platform
+    haproxy.org/ssl-cert: phoenix-tls
+    # A UI carrega trace gigante (prompt + resposta inteiros). O default de 50s
+    # do HAProxy dá 504 em trace grande; foi o mesmo ajuste do litellm.
+    haproxy.org/timeout-server: "300s"
+spec:
+  tls:
+    - hosts:
+        - phoenix.lan
+      secretName: phoenix-tls
+  rules:
+    - host: phoenix.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: phoenix
+                port:
+                  name: http

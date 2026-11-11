@@ -12,3 +12,4 @@ resources:
   - 02-deployment.yaml
   - 03-configmap-initdb.yaml
   - 04-service.yaml
+  - 05-phoenix-db-bootstrap.yaml

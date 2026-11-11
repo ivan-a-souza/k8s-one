@@ -130,3 +130,10 @@ apply_env_secret argocd argocd-oidc manifests/ops/argocd/secrets/argocd-oidc.env
 
 echo "OK: secrets aplicados."
 apply_env_secret vaultwarden vaultwarden-env manifests/argocd/vaultwarden/secrets/vaultwarden.env
+# phoenix — credenciais do banco (username/password) e env do app (PHOENIX_SECRET,
+# senha inicial do admin e client OIDC). O ns `platform` já existe. O banco vive
+# em `data`, então o MESMO arquivo phoenix-db é aplicado nos dois namespaces: é o
+# init do postgres que cria a role com essa senha (uma fonte de verdade só).
+apply_yaml_secret manifests/argocd/phoenix/secrets/phoenix-db.yaml
+apply_yaml_secret_in_ns data manifests/argocd/phoenix/secrets/phoenix-db.yaml
+apply_env_secret platform phoenix-env manifests/argocd/phoenix/secrets/phoenix.env

@@ -354,6 +354,8 @@ os Secrets via `existingSecret` — nunca contêm senha.
 | `pgadmin-credentials` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-credentials.yaml` | login inicial (interno) do pgAdmin |
 | `pgadmin-oidc` | `data` | `manifests/argocd/pgadmin/secrets/pgadmin-oidc.env` | client OIDC do pgAdmin (`PGADMIN_OIDC_*`), lido via `secretKeyRef` |
 | `argocd-oidc` | `argocd` | `manifests/ops/argocd/secrets/argocd-oidc.env` | client OIDC do Argo CD (`ARGOCD_OIDC_*`); referenciado por `$argocd-oidc:ARGOCD_OIDC_CLIENT_SECRET` |
+| `phoenix-db` | `platform` + `data` | `manifests/argocd/phoenix/secrets/phoenix-db.yaml` | role/banco PostgreSQL do Phoenix |
+| `phoenix-env` | `platform` | `manifests/argocd/phoenix/secrets/phoenix.env` | credenciais de sessão/admin e OIDC Authentik do Phoenix |
 | `vaultwarden-env` | `vaultwarden` | `manifests/argocd/vaultwarden/secrets/vaultwarden.env` | env do Vaultwarden (`ADMIN_TOKEN`, `DOMAIN`, …) |
 
 Formatos:
@@ -993,6 +995,30 @@ Detalhes do deploy que importam antes de mexer:
 - **Métricas precisam do callback**: o `/metrics` só existe com `litellm_settings.callbacks: [prometheus]` — sem ele o LiteLLM devolve 404 e o target do Prometheus fica DOWN (o ServiceMonitor em si funciona: o scrape acontece). Com o callback ligado o endpoint também passa a exigir a API key, daí o `require_auth_for_metrics_endpoint: false` (o endpoint é ClusterIP).
 
 Manifestos: `manifests/argocd/litellm/`. Secrets: ver a tabela acima.
+
+### Phoenix (`phoenix.lan`)
+
+Observabilidade de LLM em `https://phoenix.lan`, persistida no PostgreSQL 18
+compartilhado (namespace `data`, banco e role de menor privilégio `phoenix`).
+Todo estado durável do Phoenix fica no PostgreSQL; o diretório de trabalho do
+pod é `emptyDir`, portanto reiniciar o pod preserva traces e usuários.
+
+O Phoenix 21.0.0 usa **OIDC nativo** com o Authentik: o redirect URI registrado
+no provider é `https://phoenix.lan/oauth2/authentik/tokens`. `PHOENIX_ROOT_URL`
+fixa essa origem HTTPS atrás do HAProxy, e o grupo `phoenix-users` é tanto o
+gate da Application no Authentik quanto o claim avaliado pelo Phoenix. Cliente
+e credenciais de banco/sessão ficam nos arquivos ignorados `phoenix.env` e
+`phoenix-db.yaml`, aplicados por `scripts/create-secrets.sh`.
+
+O LiteLLM exporta chamadas concluídas pelo callback interno `otel` para o
+Service OTLP/gRPC `phoenix.platform.svc.cluster.local:4317`. Nenhuma credencial
+é necessária ou exposta nesse transporte interno. Faça uma chamada normal à
+API LiteLLM e consulte o trace no Phoenix depois do login via Authentik.
+
+O hook PreSync `phoenix-db-bootstrap` reconcilia a role/banco no volume
+PostgreSQL já inicializado; o ConfigMap de initdb também cobre uma recriação
+limpa. Manifestos: `manifests/phoenix/`; Application:
+`manifests/argocd/phoenix/`.
 
 ### Grafana (`grafana.lan`)
 

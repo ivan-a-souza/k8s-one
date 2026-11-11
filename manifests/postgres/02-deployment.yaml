@@ -129,6 +129,9 @@ spec:
             - name: n8n-db
               mountPath: /run/secrets/n8n-db
               readOnly: true
+            - name: phoenix-db
+              mountPath: /run/secrets/phoenix-db
+              readOnly: true
             # readOnlyRootFilesystem exige estes dois: o socket da imagem
             # Debian fica em /var/run/postgresql (não em /tmp) e o diretório da
             # imagem é read-only. Mesmo arranjo do PG do authentik, que já roda
@@ -201,6 +204,10 @@ spec:
         - name: n8n-db
           secret:
             secretName: n8n-db
+            defaultMode: 0440
+        - name: phoenix-db
+          secret:
+            secretName: phoenix-db
             defaultMode: 0440
         - name: run
           emptyDir: {}

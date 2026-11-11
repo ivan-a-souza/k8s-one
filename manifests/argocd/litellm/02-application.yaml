@@ -129,6 +129,10 @@ spec:
           litellm_settings:
             callbacks:
               - prometheus
+              # Exporta cada chamada concluída como trace OTLP para o Phoenix.
+              # O Service é ClusterIP, portanto não há endpoint/credencial
+              # exposto fora do cluster.
+              - otel
             require_auth_for_metrics_endpoint: false
 
         logLevel: INFO
@@ -204,6 +208,11 @@ spec:
         envVars:
           PYTHONUNBUFFERED: "1"
           ENFORCE_PRISMA_MIGRATION_CHECK: "true"
+          # Phoenix recebe OTLP/gRPC na porta interna 4317. O esquema http
+          # instrui o exporter gRPC a usar transporte sem TLS dentro do cluster;
+          # a UI do Phoenix continua exclusivamente no HTTPS do Ingress.
+          OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+          OTEL_EXPORTER_OTLP_ENDPOINT: "http://phoenix.platform.svc.cluster.local:4317"
 
         # --- TLS para falar com o authentik (SSO da UI) ---
         #

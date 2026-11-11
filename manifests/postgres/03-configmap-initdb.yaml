@@ -70,6 +70,7 @@ data:
     create_role authentik "$(cat /run/secrets/authentik-db/password)"
     create_role odoo      "$(cat /run/secrets/odoo-db/password)"
     create_role n8n       "$(cat /run/secrets/n8n-db/password)"
+    create_role phoenix   "$(cat /run/secrets/phoenix-db/password)"
     # CREATEDB só para o odoo: ele cria bancos pela própria interface
     # (Database Manager). O create_role acima é least privilege por padrão
     # (NOSUPERUSER/NOCREATEDB/NOCREATEROLE).
@@ -79,6 +80,7 @@ data:
     create_db authentik authentik
     create_db odoo      odoo
     create_db n8n       n8n
+    create_db phoenix   phoenix
 
     # O schema dedicado do Prisma: o DATABASE_URL do LiteLLM traz
     # `?schema=litellm`. No PostgreSQL (15+) isso nem seria necessário — o

@@ -1,0 +1,35 @@
+# Argo CD Application do Phoenix — observabilidade de LLM no ns `platform`.
+#
+# Fonte: o PRÓPRIO repo GitOps (k8s-one), caminho manifests/phoenix (com
+# kustomization.yaml; o Argo detecta kustomize sozinho). Mesmo padrão do
+# vaultwarden/odoo/postgres.
+#
+# O banco NÃO é StatefulSet aqui: é o PostgreSQL do ns `data`, com role e banco
+# `phoenix` criados pelo init do postgres (manifests/postgres/03-configmap-initdb.yaml).
+#
+# Segredos `phoenix-db` e `phoenix-env` NÃO estão no repo (gitignored) — criar
+# antes do primeiro sync com: scripts/create-secrets.sh
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: phoenix
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ivan-a-souza/k8s-one.git
+    targetRevision: main
+    path: manifests/phoenix
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # O ns `platform` já existe (authentik/litellm/n8n), mas declarar deixa o
+      # app auto-suficiente num rebuild.
+      - CreateNamespace=true
