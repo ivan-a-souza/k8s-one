@@ -183,9 +183,9 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
-            # Medido: 505 MiB de pico pós-boot. 1Gi dá folga de 2x sem inflar o
-            # requests (que é o que o scheduler enxerga).
+              # O pod usou 507 MiB no boot e foi evictado sob MemoryPressure.
+              # Reservar 768Mi impede que a telemetria seja o primeiro corte.
+              memory: 768Mi
             limits:
               cpu: "1"
               memory: 1Gi
