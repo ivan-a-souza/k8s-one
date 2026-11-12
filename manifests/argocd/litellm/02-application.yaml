@@ -161,16 +161,14 @@ spec:
           resources:
             requests:
               cpu: 50m
-              # A migration medida consome ~1,04 GiB; 512 MiB a tornava
-              # candidata a eviction sob pressão antes de concluir.
-              memory: 1280Mi
-            # 512Mi (o que eu tinha posto) NÃO basta: o `prisma migrate deploy`
-            # do schema do LiteLLM foi OOMKilled (exit 137) nas 4 tentativas.
-            # O cgroup kubepods do nó tem ~9,3G de teto com ~5,7G em uso, então
-            # 2G de teto cabe — e é um job curto, não um residente.
+              # A migration chegou a concluir o Prisma, mas o processo ainda
+              # foi OOMKilled no encerramento com limite de 2Gi.
+              memory: 2Gi
+            # Valor observado em 12/11/2026: 2Gi não bastaram. O hook é curto
+            # e roda sem o proxy LiteLLM residente durante este rollout.
             limits:
               cpu: "1"
-              memory: 2Gi
+              memory: 3Gi
           # O template do job usa os MESMOS `.Values.volumes`,
           # `.Values.volumeMounts` e `.Values.extraEnvVars` do Deployment, mas
           # NAO o `.Values.extraInitContainers` (cada um tem o seu). Como o
