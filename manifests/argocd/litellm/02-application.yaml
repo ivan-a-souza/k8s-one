@@ -266,6 +266,13 @@ spec:
             value: /certs/ca-bundle.crt
           - name: REQUESTS_CA_BUNDLE
             value: /certs/ca-bundle.crt
+          # Phoenix autentica o OTLP quando PHOENIX_ENABLE_AUTH=True. A chave
+          # completa já inclui o formato exigido pelo exporter: authorization=Bearer …
+          - name: OTEL_EXPORTER_OTLP_HEADERS
+            valueFrom:
+              secretKeyRef:
+                name: phoenix-telemetry
+                key: OTEL_EXPORTER_OTLP_HEADERS
 
         ingress:
           enabled: true

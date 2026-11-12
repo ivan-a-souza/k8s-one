@@ -137,3 +137,18 @@ apply_env_secret vaultwarden vaultwarden-env manifests/argocd/vaultwarden/secret
 apply_yaml_secret manifests/argocd/phoenix/secrets/phoenix-db.yaml
 apply_yaml_secret_in_ns data manifests/argocd/phoenix/secrets/phoenix-db.yaml
 apply_env_secret platform phoenix-env manifests/argocd/phoenix/secrets/phoenix.env
+
+# Phoenix exige bearer auth também no coletor OTLP. Derivamos uma credencial de
+# máquina separada do segredo de sessão; o valor nunca entra no Git e pode ser
+# reconstruído a partir da fonte gitignored phoenix.env.
+create_phoenix_telemetry_secret() {
+  local file=manifests/argocd/phoenix/secrets/phoenix.env session_secret admin_secret
+  [ -f "$file" ] || { echo "skip: $file (ausente)"; return 0; }
+  session_secret=$(sed -n 's/^PHOENIX_SECRET=//p' "$file" | tail -n 1)
+  [ -n "$session_secret" ] || { echo "erro: PHOENIX_SECRET ausente em $file" >&2; return 1; }
+  admin_secret=$(printf '%s' "${session_secret}:phoenix-otel-admin-v1" | sha256sum | awk '{print $1}')
+  printf 'PHOENIX_ADMIN_SECRET=%s\nOTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer %s\n' "$admin_secret" "$admin_secret" \
+    | "${KC[@]}" -n platform create secret generic phoenix-telemetry --from-env-file=/dev/stdin --dry-run=client -o yaml \
+    | "${KC[@]}" apply -f -
+}
+create_phoenix_telemetry_secret

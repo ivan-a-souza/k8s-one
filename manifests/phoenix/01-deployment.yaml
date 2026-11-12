@@ -60,6 +60,13 @@ spec:
                 secretKeyRef:
                   name: phoenix-env
                   key: PHOENIX_SECRET
+            # Credencial de máquina para ingestão OTLP. É diferente do segredo
+            # de sessão e não é exposta pelo Ingress.
+            - name: PHOENIX_ADMIN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: phoenix-telemetry
+                  key: PHOENIX_ADMIN_SECRET
             # Basic auth segue LIGADO de propósito: é o caminho de entrada se o
             # OIDC do Authentik quebrar. Desligar só depois de validar login
             # pelo SSO (PHOENIX_DISABLE_BASIC_AUTH=True).
