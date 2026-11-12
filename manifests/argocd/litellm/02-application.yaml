@@ -161,7 +161,9 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 512Mi
+              # A migration medida consome ~1,04 GiB; 512 MiB a tornava
+              # candidata a eviction sob pressão antes de concluir.
+              memory: 1280Mi
             # 512Mi (o que eu tinha posto) NÃO basta: o `prisma migrate deploy`
             # do schema do LiteLLM foi OOMKilled (exit 137) nas 4 tentativas.
             # O cgroup kubepods do nó tem ~9,3G de teto com ~5,7G em uso, então
